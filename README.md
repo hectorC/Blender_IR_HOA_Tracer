@@ -40,7 +40,7 @@ subprocess.check_call([pybin, "-m", "pip", "install", "--upgrade", "pip"])
 subprocess.check_call([pybin, "-m", "pip", "install", "soundfile", "scipy"])
 ```
 
-   - Alternatively, from a shell you can run Blender�s bundled Python directly (adjust the path to match your platform):
+   - Alternatively, from a shell you can run Blender's bundled Python directly (adjust the path to match your platform):
 
 ```bash
 "/path/to/Blender/4.5/python/bin/python3.10" -m pip install --upgrade pip
@@ -62,10 +62,10 @@ subprocess.check_call([pybin, "-m", "pip", "install", "soundfile", "scipy"])
 3. **Render the impulse response**
    - Click **Render Ambisonic IR** in the panel.
    - The add-on caches the BVH for the scene and traces all passes, averaging the result.
-   - Status messages appear in the Info bar (and Blender�s console, if open).
+   - Status messages appear in the Info bar (and Blender's console, if open).
 4. **Retrieve the output**
    - By default the IR is saved as `ir_output.wav` next to the `.blend` file.
-   - If Blender cannot write to that folder, it falls back to Blender�s temporary directory or the system temp directory. The console message includes the exact path.
+   - If Blender cannot write to that folder, it falls back to Blender's temporary directory or the system temp directory. The console message includes the exact path.
 
 ## Parameter Reference
 
