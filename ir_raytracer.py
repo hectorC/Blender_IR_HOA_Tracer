@@ -72,8 +72,8 @@ def register_acoustic_props():
         name="Tracing mode",
         description="Reverse = early specular; Forward = stochastic tail & early",
         items=[
-            ('FORWARD','Forward (source→room)','Stochastic forward tracing with receiver capture + path connection'),
-            ('REVERSE','Reverse (receiver→room)','Specular reverse tracing with LOS-to-source check')
+            ('FORWARD','Forward (source->room)','Stochastic forward tracing with receiver capture + path connection'),
+            ('REVERSE','Reverse (receiver->room)','Specular reverse tracing with LOS-to-source check')
         ],
         default='FORWARD'
     )
@@ -88,7 +88,7 @@ def register_acoustic_props():
     scene.airt_calibrate_direct = bpy.props.BoolProperty(name="Calibrate direct (1/r)", default=True)
     # Air absorption (frequency-dependent)
     scene.airt_air_enable = bpy.props.BoolProperty(name="Air absorption (freq)", default=True)
-    scene.airt_air_temp_c = bpy.props.FloatProperty(name="Air temp (°C)", default=20.0, min=-30.0, max=50.0)
+    scene.airt_air_temp_c = bpy.props.FloatProperty(name="Air temp (deg C)", default=20.0, min=-30.0, max=50.0)
     scene.airt_air_humidity = bpy.props.FloatProperty(name="Rel humidity (%)", default=50.0, min=0.0, max=100.0)
     scene.airt_air_pressure_kpa = bpy.props.FloatProperty(name="Air pressure (kPa)", default=101.325, min=80.0, max=110.0)
 
@@ -179,25 +179,28 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
             self.report({'ERROR'}, "scipy is required for SH encoding. Install with:\n" + cmd)
             return {'CANCELLED'}
 
-        sources = [o for o in bpy.data.objects if o.is_acoustic_source]
-        receivers = [o for o in bpy.data.objects if o.is_acoustic_receiver]
+        scene = context.scene
+        sources = [o for o in scene.objects if getattr(o, 'is_acoustic_source', False)]
+        receivers = [o for o in scene.objects if getattr(o, 'is_acoustic_receiver', False)]
         if not sources or not receivers:
             self.report({'WARNING'}, "Need one source and one receiver")
             return {'CANCELLED'}
 
-        # seeding handled per-pass below
-
         source = sources[0].location.copy()
         receiver = receivers[0].location.copy()
 
-        passes = max(1, int(context.scene.airt_passes))
+        passes = max(1, int(scene.airt_passes))
+        num_rays = max(1, int(scene.airt_num_rays))
+        directions = fibonacci_sphere(num_rays)
+        bvh, obj_map = build_bvh(context)
+
         ir = None
         for i in range(passes):
-            if context.scene.airt_seed:
-                seed = int(context.scene.airt_seed) + i
+            if scene.airt_seed:
+                seed = int(scene.airt_seed) + i
                 random.seed(seed)
                 np.random.seed(seed)
-            ir_i = trace_ir(context, source, receiver)
+            ir_i = trace_ir(context, source, receiver, bvh=bvh, obj_map=obj_map, directions=directions)
             if ir is None:
                 ir = ir_i.astype(np.float32)
             else:
@@ -205,12 +208,12 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
         ir /= float(passes)
 
         # Optional: calibrate direct-path amplitude to 1/r so distance perception is correct
-        if bool(getattr(context.scene, 'airt_calibrate_direct', False)):
+        if bool(getattr(scene, 'airt_calibrate_direct', False)):
             ir, info = calibrate_direct_1_over_r(ir, context, source, receiver)
             self.report({'INFO'}, info)
 
-        sr = context.scene.airt_sr
-        subtype = context.scene.airt_wav_subtype
+        sr = scene.airt_sr
+        subtype = scene.airt_wav_subtype
         wav_path = get_writable_path("ir_output.wav")
         try:
             sf.write(wav_path, ir.T.astype(np.float32), samplerate=sr, subtype=subtype)
@@ -220,14 +223,16 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
             return {'CANCELLED'}
         return {'FINISHED'}
 
+
+
 # ----------------------------------------------------------------------------
 # Utility: air absorption (ISO 9613-1), calibration and output path resolution
 # ----------------------------------------------------------------------------
 
 def iso9613_alpha_dbpm(f_hz: float, T_c: float, rh_pct: float, p_kpa: float) -> float:
-    """Approximate ISO 9613-1 atmospheric absorption coefficient α in dB/m.
-    Inputs: frequency in Hz, temperature in °C, relative humidity in %, pressure in kPa.
-    Returns α [dB/m].
+    """Approximate ISO 9613-1 atmospheric absorption coefficient alpha in dB/m.
+    Inputs: frequency in Hz, temperature in deg C, relative humidity in %, pressure in kPa.
+    Returns alpha [dB/m].
     """
     import numpy as _np
     T = 273.15 + float(T_c)
@@ -251,7 +256,7 @@ def iso9613_alpha_dbpm(f_hz: float, T_c: float, rh_pct: float, p_kpa: float) -> 
 def _air_kernel_for_distance(distance: float, sr: int, context) -> np.ndarray:
     """Design a short low-pass kernel that approximates frequency-dependent air loss
     for a given path length. We match the magnitude at 8 kHz using a biquad low-pass
-    (Q≈0.707) and return its impulse response (length 8)."""
+    (Q~0.707) and return its impulse response (length 8)."""
     import numpy as _np
     if distance <= 0.0 or not bool(getattr(context.scene, 'airt_air_enable', True)):
         return _np.array([1.0], dtype=_np.float32)
@@ -264,7 +269,7 @@ def _air_kernel_for_distance(distance: float, sr: int, context) -> np.ndarray:
     target_gain = 10.0 ** (-(alpha_dbpm * distance) / 20.0)
     target_gain = float(max(1e-6, min(1.0, target_gain)))
 
-    # RBJ biquad low-pass, solve for fc s.t. |H(f_ref)|≈target_gain
+    # RBJ biquad low-pass, solve for fc s.t. |H(f_ref)|~target_gain
     def biquad_coeffs(fc, fs, Q=0.707):
         from math import sin, cos, pi
         w0 = 2.0 * pi * (fc / fs)
@@ -323,76 +328,36 @@ def _air_kernel_for_distance(distance: float, sr: int, context) -> np.ndarray:
     return y
 
 
-def _speed_of_sound_bu(context):
-    # Adjust speed of sound for unit scale (1 BU = scale_length meters)
-    unit_scale = float(getattr(bpy.context.scene.unit_settings, "scale_length", 1.0) or 1.0)
-    return 343.0 / max(unit_scale, 1e-9)
-
-
-def calibrate_direct_1_over_r(ir: np.ndarray, context, source, receiver):
-    """Scale the entire IR so that the direct-path amplitude in W matches 1/dist.
-    Uses the geometric delay to locate the direct sample and measures the local max in a ±10-sample window.
-    Always applies scaling if energy is found; otherwise, it skips safely. Returns (ir, info_string).
-    """
-    try:
-        sr = int(context.scene.airt_sr)
-        # Speed of sound in Blender units (unit scale compensated)
-        unit_scale = float(getattr(bpy.context.scene.unit_settings, "scale_length", 1.0) or 1.0)
-        c = 343.0 / max(unit_scale, 1e-9)
-        dist = (receiver - source).length
-        if dist <= 1e-9 or ir.shape[1] <= 22:
-            return ir, "Calibrate: skipped (zero distance or IR too short)"
-        # Predicted direct delay (samples)
-        delay = (dist / c) * sr
-        n = int(round(delay))
-        # Widened search window ±10 samples
-        n0 = max(0, n - 10)
-        n1 = min(ir.shape[1], n + 11)
-        # Measured W (ACN 0) amplitude near direct
-        a_meas = float(np.max(np.abs(ir[0, n0:n1])))
-        if a_meas <= 1e-9:
-            return ir, f"Calibrate: skipped (no direct energy near n≈{n})"
-        a_exp = 1.0 / max(dist, 1e-9)
-        k = a_exp / a_meas
-        ir *= k
-        return ir, f"Calibrate: dist={dist:.3f}m, expW={a_exp:.6f}, measW={a_meas:.6f}, k={k:.4f}, n≈{n}, window=±10"
-    except Exception as e:
-        return ir, f"Calibrate: skipped (err: {e})"
 # ----------------------------------------------------------------------------
 
 def _speed_of_sound_bu(context):
-    # Adjust speed of sound for unit scale (1 BU = scale_length meters)
-    unit_scale = float(getattr(bpy.context.scene.unit_settings, "scale_length", 1.0) or 1.0)
+    """Convert physical speed of sound to Blender units using the scene scale."""
+    scene = getattr(context, "scene", None) or bpy.context.scene
+    unit_settings = getattr(scene, "unit_settings", None)
+    scale_length = getattr(unit_settings, "scale_length", 1.0) if unit_settings else 1.0
+    unit_scale = float(scale_length or 1.0)
     return 343.0 / max(unit_scale, 1e-9)
 
 
 def calibrate_direct_1_over_r(ir: np.ndarray, context, source, receiver):
-    """Scale the entire IR so that the direct-path amplitude in W matches 1/dist.
-    Uses the geometric delay to locate the direct sample and measures the local max in a ±10-sample window.
-    Always applies scaling if energy is found; otherwise, it skips safely. Returns (ir, info_string).
-    """
+    """Scale the entire IR so that the direct-path amplitude in W matches 1/dist."""
     try:
         sr = int(context.scene.airt_sr)
-        # Speed of sound in Blender units (unit scale compensated)
-        unit_scale = float(getattr(bpy.context.scene.unit_settings, "scale_length", 1.0) or 1.0)
-        c = 343.0 / max(unit_scale, 1e-9)
+        c = _speed_of_sound_bu(context)
         dist = (receiver - source).length
         if dist <= 1e-9 or ir.shape[1] <= 22:
             return ir, "Calibrate: skipped (zero distance or IR too short)"
-        # Predicted direct delay (samples)
         delay = (dist / c) * sr
         n = int(round(delay))
-        # Widened search window ±10 samples
         n0 = max(0, n - 10)
         n1 = min(ir.shape[1], n + 11)
-        # Measured W (ACN 0) amplitude near direct
         a_meas = float(np.max(np.abs(ir[0, n0:n1])))
         if a_meas <= 1e-9:
-            return ir, f"Calibrate: skipped (no direct energy near n≈{n})"
+            return ir, f"Calibrate: skipped (no direct energy near n~{n})"
         a_exp = 1.0 / max(dist, 1e-9)
         k = a_exp / a_meas
         ir *= k
-        return ir, f"Calibrate: dist={dist:.3f}m, expW={a_exp:.6f}, measW={a_meas:.6f}, k={k:.4f}, n≈{n}, window=±10"
+        return ir, f"Calibrate: dist={dist:.3f}m, expW={a_exp:.6f}, measW={a_meas:.6f}, k={k:.4f}, n~{n}, window=+/-10"
     except Exception as e:
         return ir, f"Calibrate: skipped (err: {e})"
 
@@ -437,13 +402,20 @@ def get_writable_path(filename: str) -> str:
 # Ray Tracing (Reverse from Receiver) with Specular + Diffuse Scattering
 # ----------------------------------------------------------------------------
 
-def build_bvh():
+def build_bvh(context):
     verts = []
     polys = []
     obj_map = []  # polygon index -> object (for absorption/scatter)
-    depsgraph = bpy.context.evaluated_depsgraph_get()
-    for obj in bpy.context.scene.objects:
-        if obj.type == 'MESH' and not obj.is_acoustic_source and not obj.is_acoustic_receiver and obj.visible_get():
+    scene = getattr(context, "scene", None) or bpy.context.scene
+    view_layer = getattr(context, "view_layer", None)
+    depsgraph_get = getattr(context, "evaluated_depsgraph_get", None)
+    if callable(depsgraph_get):
+        depsgraph = depsgraph_get()
+    else:
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+    for obj in scene.objects:
+        visible = obj.visible_get(view_layer=view_layer) if view_layer else obj.visible_get()
+        if obj.type == 'MESH' and not getattr(obj, 'is_acoustic_source', False) and not getattr(obj, 'is_acoustic_receiver', False) and visible:
             obj_eval = obj.evaluated_get(depsgraph)
             mesh = obj_eval.to_mesh(preserve_all_data_layers=False, depsgraph=depsgraph)
             if mesh is None:
@@ -531,28 +503,31 @@ def segment_hits_sphere(p0, p1, center, radius):
     return True, float(t_hit), point
 
 
-def trace_ir(context, source, receiver):
+def trace_ir(context, source, receiver, bvh=None, obj_map=None, directions=None):
+    if bvh is None or obj_map is None:
+        bvh, obj_map = build_bvh(context)
+    if directions is None:
+        num_rays = max(1, int(context.scene.airt_num_rays))
+        directions = fibonacci_sphere(num_rays)
     mode = context.scene.airt_trace_mode
     if mode == 'FORWARD':
-        return _trace_ir_forward(context, source, receiver)
+        return _trace_ir_forward(context, source, receiver, bvh, obj_map, directions)
     else:
-        return _trace_ir_reverse(context, source, receiver)
+        return _trace_ir_reverse(context, source, receiver, bvh, obj_map, directions)
 
 
-def _trace_ir_forward(context, source, receiver):
+def _trace_ir_forward(context, source, receiver, bvh, obj_map, directions):
     num_channels = 16
     sr = context.scene.airt_sr
     ir_length = int(context.scene.airt_ir_seconds * sr)
     ir = np.zeros((num_channels, ir_length), dtype=np.float32)
-    bvh, obj_map = build_bvh()
 
-    # Speed of sound adjusted for unit scale (1 BU = scale_length meters)
-    unit_scale = float(getattr(bpy.context.scene.unit_settings, "scale_length", 1.0) or 1.0)
-    c = 343.0 / max(unit_scale, 1e-9)
-    num_rays = context.scene.airt_num_rays
+    scene = context.scene
+    unit_settings = getattr(scene, "unit_settings", None)
+    unit_scale = float(getattr(unit_settings, "scale_length", 1.0) or 1.0)
+    c = _speed_of_sound_bu(context)
     max_bounces = context.scene.airt_max_order
     tol_rad = context.scene.airt_angle_tol_deg * pi / 180.0
-    # Receiver radius is specified in METERS in the UI; convert to Blender units
     recv_r_m = max(1e-6, float(context.scene.airt_recv_radius))
     recv_r = recv_r_m / max(unit_scale, 1e-9)
     rr_enable = bool(context.scene.airt_rr_enable)
@@ -560,6 +535,7 @@ def _trace_ir_forward(context, source, receiver):
     rr_p = float(context.scene.airt_rr_p)
     seg_capture = bool(context.scene.airt_enable_seg_capture)
     rough_rad = max(0.0, float(context.scene.airt_spec_rough_deg)) * pi / 180.0
+    eps = 1e-4
 
     def refl_amp(absorb):
         # Absorption is an ENERGY coefficient; convert to AMPLITUDE reflectivity
@@ -577,14 +553,11 @@ def _trace_ir_forward(context, source, receiver):
             amp = 1.0 / max(dist, recv_r)
             add_impulse_air(ir, ambi, delay, amp, dist, context, sr)
 
-    directions = fibonacci_sphere(num_rays)
-    eps = 1e-4
-
     for d in directions:
         dirn = mathutils.Vector(d).normalized()
         pos = source.copy()
         path_len = 0.0
-        refl_prod = 1.0  # product of per-bounce reflection AMPLITUDE (sqrt(1-α))
+        refl_prod = 1.0  # product of per-bounce reflection amplitude (sqrt(1-alpha))
         bounce = 0
         while True:
             if bvh is None or bounce > max_bounces:
@@ -596,7 +569,7 @@ def _trace_ir_forward(context, source, receiver):
                 # Optional capture along a far segment to catch near misses
                 if seg_capture:
                     far = pos + dirn * 100.0
-                    got, t_hit, p_hit = segment_hits_sphere(pos, far, receiver, recv_r)
+                    got, t_hit, _ = segment_hits_sphere(pos, far, receiver, recv_r)
                     if got:
                         seg_len = (far - pos).length * t_hit
                         total_dist = path_len + seg_len
@@ -617,7 +590,7 @@ def _trace_ir_forward(context, source, receiver):
 
             # Segment capture along pos->hit (improves early density)
             if seg_capture:
-                got, t_hit, p_hit = segment_hits_sphere(pos, next_pos, receiver, recv_r)
+                got, t_hit, _ = segment_hits_sphere(pos, next_pos, receiver, recv_r)
                 if got:
                     partial_len = seg_len * t_hit
                     total_dist = path_len + partial_len
@@ -682,8 +655,8 @@ def _trace_ir_forward(context, source, receiver):
                 b = v.cross(t).normalized()
                 u = random.random()
                 vphi = 2.0 * pi * random.random()
-                cos_a = 1.0 - u*(1.0 - cos(rough_rad))
-                sin_a = sqrt(max(0.0, 1.0 - cos_a*cos_a))
+                cos_a = 1.0 - u * (1.0 - cos(rough_rad))
+                sin_a = sqrt(max(0.0, 1.0 - cos_a * cos_a))
                 jittered = (v * cos_a + t * (sin_a * cos(vphi)) + b * (sin_a * sin(vphi))).normalized()
                 spec_dir = jittered
 
@@ -700,25 +673,21 @@ def _trace_ir_forward(context, source, receiver):
             pos = hit + normal * eps
             bounce += 1
 
-    # Optional: disable peak normalization to avoid a late spike defining the scale
-    # (Many convolvers normalize externally.)
+    # Keep absolute scale; downstream convolvers can normalize if needed.
     return ir
 
 
-def _trace_ir_reverse(context, source, receiver):
+def _trace_ir_reverse(context, source, receiver, bvh, obj_map, directions):
     # Existing reverse implementation (specular/diffuse with LOS-to-source)
     num_channels = 16  # 3rd order HOA (ACN)
     sr = context.scene.airt_sr
     ir_length = int(context.scene.airt_ir_seconds * sr)
     ir = np.zeros((num_channels, ir_length), dtype=np.float32)
-    bvh, obj_map = build_bvh()
 
-    # Speed of sound adjusted for unit scale (1 BU = scale_length meters)
-    unit_scale = float(getattr(bpy.context.scene.unit_settings, "scale_length", 1.0) or 1.0)
-    c = 343.0 / max(unit_scale, 1e-9)  # m/s in Blender units
-    num_rays = context.scene.airt_num_rays
-    max_order = context.scene.airt_max_order
+    c = _speed_of_sound_bu(context)
     tol_rad = context.scene.airt_angle_tol_deg * pi / 180.0
+    max_order = context.scene.airt_max_order
+    eps = 1e-4
 
     # Direct path (order 0)
     if los_clear(source, receiver, bvh):
@@ -730,10 +699,6 @@ def _trace_ir_reverse(context, source, receiver):
             delay = (dist / c) * sr
             amp = 1.0 / max(dist, 1e-6)
             add_impulse_air(ir, ambi, delay, amp, dist, context, sr)
-
-    # Reverse/specular+diffuse reflections
-    directions = fibonacci_sphere(num_rays)
-    eps = 1e-4
 
     for d in directions:
         first_dir = mathutils.Vector(d).normalized()  # from receiver outward
@@ -797,6 +762,8 @@ def _trace_ir_reverse(context, source, receiver):
     # Do not normalize here; preserve direct-to-reverb ratio
     return ir
 
+
+
 # ----------------------------------------------------------------------------
 # Sampling on the sphere
 # ----------------------------------------------------------------------------
@@ -845,9 +812,9 @@ def fibonacci_sphere(samples):
 def _apply_orientation(direction, context):
     """Map Blender world axes (X right, Y forward, Z up) to AmbiX axes (X front, Y left, Z up),
     then apply a yaw around +Z and optional Z flip.
-    Blender → AmbiX mapping (default): X_a = −Y_b, Y_a = +X_b, Z_a = +Z_b.
+    Blender -> AmbiX mapping (default): X_a = -Y_b, Y_a = +X_b, Z_a = +Z_b.
     """
-    # Blender → AmbiX basis mapping
+    # Blender -> AmbiX basis mapping
     xb, yb, zb = float(direction.x), float(direction.y), float(direction.z)
     xa = -yb
     ya = xb
