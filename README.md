@@ -1,4 +1,4 @@
-Code generated with AI asistance (ChatGPT).
+Code generated with AI asistance (ChatGPT). Use at your own risk. It seems to produce acceptable results.
 
 # Ambisonic IR Tracer for Blender
 
@@ -26,11 +26,11 @@ Ambisonic IR Tracer is a Blender add-on that renders third-order ambisonic (ACN/
    - Clone or download this repository, or create a ZIP archive containing `ir_raytracer.py`.
 2. **Install in Blender**
    - Launch Blender and open *Edit ? Preferences ? Add-ons*.
-   - Click *Install�*, browse to the ZIP (or `ir_raytracer.py`), and confirm.
+   - Click *Install*, browse to the ZIP (or `ir_raytracer.py`), and confirm.
    - Enable the checkbox next to **Ambisonic IR Tracer**.
    - Blender will store the add-on under `scripts/addons` in your user configuration.
 3. **Install Python dependencies** (only needs to be done once per Blender installation)
-   - Open Blender�s *Scripting* workspace.
+   - Open Blender's *Scripting* workspace.
    - Copy-paste the snippet below into the Python console or a text block and run it:
 
 ```python
