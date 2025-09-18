@@ -110,7 +110,7 @@ subprocess.check_call([pybin, "-m", "pip", "install", "soundfile", "scipy"])
 - When scripting renders from the command line (`blender -b`), pass `--python-expr "import bpy; bpy.ops.airt.render_ir()"` after setting up the scene in advance.
 - For scenes with scaled units, the add-on compensates via the scene's unit scale; verify the *Unit Scale* value in *Scene Properties > Units* if delays or attenuation feel incorrect.
 
-Enjoy tracing ambisonic impulse responses directly inside Blender! [human](so kind of you ChatGPT, as always)[/human]
+Enjoy tracing ambisonic impulse responses directly inside Blender! [human][sarcasm](so kind of you ChatGPT, as always)[/sarcasm][/human]
 
 
 
