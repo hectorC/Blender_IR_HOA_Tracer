@@ -1,4 +1,4 @@
-[human] Code generated with AI asistance (ChatGPT). Use at your own risk. It seems to produce usable results for artistic purposes. [/human]
+[human] Code generated with AI asistance (ChatGPT 5 and Codex). Use at your own risk. It seems to produce usable results for artistic purposes. [/human]
 
 # Ambisonic IR Tracer for Blender
 
