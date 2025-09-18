@@ -624,8 +624,10 @@ def _trace_ir_forward(context, source, receiver, bvh, obj_map, directions):
                         total_dist = path_len + seg_len
                         incoming = (-dirn).normalized()
                         ambi = encode_ambisonics_3rd_order(_apply_orientation(incoming, context))
-                        # Geometric acceptance ~ (pi R^2) / (4 pi r^2) and pressure 1/r => ~ R^2 / (4 r^3)
-                        amp = refl_prod * (recv_r * recv_r) / (4.0 * max(total_dist, recv_r)**3)
+                        # Geometric acceptance: projected area over sphere, convert energy -> pressure via sqrt
+                        area = pi * recv_r * recv_r
+                        view = area / max(4.0 * pi * total_dist * total_dist, 1e-9)
+                        amp = refl_prod * sqrt(view) / max(total_dist, recv_r)
                         delay = (total_dist / c) * sr
                         add_impulse_air(ir, ambi, delay, amp, total_dist, context, sr)
                 break
@@ -645,8 +647,10 @@ def _trace_ir_forward(context, source, receiver, bvh, obj_map, directions):
                     total_dist = path_len + partial_len
                     incoming = (-dirn).normalized()
                     ambi = encode_ambisonics_3rd_order(_apply_orientation(incoming, context))
-                    # Geometric acceptance ~ (pi R^2) / (4 pi r^2) and pressure 1/r => ~ R^2 / (4 r^3)
-                    amp = refl_prod * (recv_r * recv_r) / (4.0 * max(total_dist, recv_r)**3)
+                    # Geometric acceptance: projected area over sphere, convert energy -> pressure via sqrt
+                    area = pi * recv_r * recv_r
+                    view = area / max(4.0 * pi * total_dist * total_dist, 1e-9)
+                    amp = refl_prod * sqrt(view) / max(total_dist, recv_r)
                     delay = (total_dist / c) * sr
                     add_impulse_air(ir, ambi, delay, amp, total_dist, context, sr)
 
@@ -667,15 +671,14 @@ def _trace_ir_forward(context, source, receiver, bvh, obj_map, directions):
                 weight_spec = (1.0 - scatter) * np.exp(-(dtheta / max(tol_rad, 1e-6))**2)
                 # Diffuse lobe
                 cos_i = max(0.0, (-dirn).dot(normal))
-                cos_o = max(0.0, to_rcv_dir.dot(normal))
-                weight_diff = scatter * (cos_i * cos_o / pi)
+                weight_diff = scatter * (cos_i / pi)
                 total_weight = max(0.0, min(1.0, weight_spec + weight_diff))
                 if total_weight > 1e-6:
                     total_dist = d_to_hit + dist_rcv
                     incoming = (hit - receiver).normalized()
                     ambi = encode_ambisonics_3rd_order(_apply_orientation(incoming, context))
                     # Treat lobe weight as a POWER factor; convert to amplitude via sqrt
-                    amp = (refl_prod * r_amp * sqrt(total_weight)) / max(total_dist, recv_r)
+                    amp = (refl_prod * r_amp * sqrt(max(total_weight, 0.0))) / max(total_dist, recv_r)
                     delay = (total_dist / c) * sr
                     add_impulse_air(ir, ambi, delay, amp, total_dist, context, sr)
 
@@ -735,6 +738,11 @@ def _trace_ir_reverse(context, source, receiver, bvh, obj_map, directions):
 
     c = _speed_of_sound_bu(context)
     tol_rad = context.scene.airt_angle_tol_deg * pi / 180.0
+
+    def refl_amp(absorb):
+        a = max(0.0, min(1.0, float(absorb)))
+        return sqrt(1.0 - a)
+
     max_order = context.scene.airt_max_order
     eps = 1e-4
 
@@ -769,7 +777,7 @@ def _trace_ir_reverse(context, source, receiver, bvh, obj_map, directions):
             hit_obj = obj_map[index] if 0 <= index < len(obj_map) else None
             absorb = float(getattr(hit_obj, 'absorption', 0.2)) if hit_obj else 0.2
             scatter = float(getattr(hit_obj, 'scatter', 0.0)) if hit_obj else 0.0
-            energy *= max(0.0, 1.0 - absorb)
+            energy *= refl_amp(absorb)
 
             # Contribution to source from this bounce (specular and diffuse)
             to_src = (source - hit)
@@ -781,8 +789,7 @@ def _trace_ir_reverse(context, source, receiver, bvh, obj_map, directions):
                 dtheta = acos(cosang)
                 weight_spec = (1.0 - scatter) * np.exp(-(dtheta / max(tol_rad, 1e-6))**2)
                 cos_i = max(0.0, (-dirn).dot(normal))
-                cos_o = max(0.0, to_src_dir.dot(normal))
-                weight_diff = scatter * (cos_i * cos_o / pi)
+                weight_diff = scatter * (cos_i / pi)
 
                 total_weight = weight_spec + weight_diff
                 if total_weight > 1e-6:
@@ -790,7 +797,7 @@ def _trace_ir_reverse(context, source, receiver, bvh, obj_map, directions):
                     incoming_dir = -first_dir
                     ambi = encode_ambisonics_3rd_order(_apply_orientation(incoming_dir, context))
                     delay = (total_dist / c) * sr
-                    amp = (energy * total_weight) / max(total_dist, 1e-6)
+                    amp = (energy * sqrt(max(total_weight, 0.0))) / max(total_dist, 1e-6)
                     add_impulse_air(ir, ambi, delay, amp, total_dist, context, sr)
 
             # Continue with a scattered/specular mixture direction
