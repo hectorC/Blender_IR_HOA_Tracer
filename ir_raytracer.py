@@ -27,24 +27,72 @@ try:
 except Exception:
     lpmv = None
 
+MATERIAL_PRESET_DATA = [
+    ('WOOD', 'Wood (panel)', 0.18, 0.35),
+    ('CONCRETE', 'Concrete', 0.05, 0.15),
+    ('CARPET', 'Carpet', 0.60, 0.60),
+    ('TILE', 'Tile', 0.07, 0.20),
+    ('BRICK', 'Brick', 0.04, 0.45)
+]
+MATERIAL_PRESETS = {identifier: (absorption, scatter) for identifier, _, absorption, scatter in MATERIAL_PRESET_DATA}
+_MATERIAL_PRESET_ITEMS = [('CUSTOM', 'Custom', 'User-defined absorption and scatter')]
+for identifier, label, absorption, scatter in MATERIAL_PRESET_DATA:
+    desc = f"{label}: absorption {absorption:.2f}, scatter {scatter:.2f}"
+    _MATERIAL_PRESET_ITEMS.append((identifier, label, desc))
+_MATERIAL_PRESET_GUARD = set()
+
+
+def _update_material_preset(self, context):
+    preset = getattr(self, 'airt_material_preset', 'CUSTOM')
+    if preset == 'CUSTOM':
+        return
+    values = MATERIAL_PRESETS.get(preset)
+    if not values:
+        return
+    key = id(self)
+    _MATERIAL_PRESET_GUARD.add(key)
+    try:
+        self.absorption = values[0]
+        self.scatter = values[1]
+    finally:
+        _MATERIAL_PRESET_GUARD.discard(key)
+
+
+def _mark_material_custom(self, context):
+    key = id(self)
+    if key in _MATERIAL_PRESET_GUARD:
+        return
+    if getattr(self, 'airt_material_preset', 'CUSTOM') != 'CUSTOM':
+        self.airt_material_preset = 'CUSTOM'
+
+
 # ----------------------------------------------------------------------------
 # Properties
 # ----------------------------------------------------------------------------
 
 def register_acoustic_props():
+    bpy.types.Object.airt_material_preset = bpy.props.EnumProperty(
+        name="Material Preset",
+        description="Apply common material absorption/scatter values",
+        items=_MATERIAL_PRESET_ITEMS,
+        default='CUSTOM',
+        update=_update_material_preset
+    )
     bpy.types.Object.absorption = bpy.props.FloatProperty(
         name="Absorption",
         description="Wideband absorption coefficient (0 = reflective, 1 = fully absorbent)",
         default=0.2,
         min=0.0,
-        max=1.0
+        max=1.0,
+        update=_mark_material_custom
     )
     bpy.types.Object.scatter = bpy.props.FloatProperty(
         name="Scatter",
         description="Surface scattering (0 = purely specular, 1 = fully diffuse/cosine)",
         default=0.35,
         min=0.0,
-        max=1.0
+        max=1.0,
+        update=_mark_material_custom
     )
     bpy.types.Object.is_acoustic_source = bpy.props.BoolProperty(name="Acoustic Source", default=False)
     bpy.types.Object.is_acoustic_receiver = bpy.props.BoolProperty(name="Acoustic Receiver", default=False)
@@ -94,7 +142,7 @@ def register_acoustic_props():
 
 
 def unregister_acoustic_props():
-    for attr in ("absorption", "scatter", "is_acoustic_source", "is_acoustic_receiver"):
+    for attr in ("absorption", "scatter", "is_acoustic_source", "is_acoustic_receiver", "airt_material_preset"):
         if hasattr(bpy.types.Object, attr):
             delattr(bpy.types.Object, attr)
     scene = bpy.types.Scene
@@ -127,6 +175,7 @@ class AIRT_PT_Panel(bpy.types.Panel):
         col = layout.column(align=True)
         col.label(text="Object Properties")
         if obj:
+            col.prop(obj, "airt_material_preset")
             col.prop(obj, "absorption")
             col.prop(obj, "scatter")
             col.prop(obj, "is_acoustic_source")

@@ -1,4 +1,4 @@
-Code generated with AI asistance (ChatGPT). Use at your own risk. It seems to produce acceptable results.
+Code generated with AI asistance (ChatGPT). Use at your own risk. It seems to produce usable results for artistic purposes.
 
 # Ambisonic IR Tracer for Blender
 
@@ -70,6 +70,7 @@ subprocess.check_call([pybin, "-m", "pip", "install", "soundfile", "scipy"])
 ## Parameter Reference
 
 ### Object Properties
+- **Material Preset**: Applies preset absorption and scatter values for common surfaces.
 - **Absorption**: Wideband energy absorption coefficient (0 reflective, 1 fully absorbing).
 - **Scatter**: Fraction of reflected energy sent into diffuse (cosine) lobes instead of specular reflections (0 = specular, 1 = fully diffuse).
 - **Acoustic Source**: Marks the object whose origin emits sound for reverse tracing and defines the starting point for forward tracing rays.
@@ -110,6 +111,8 @@ subprocess.check_call([pybin, "-m", "pip", "install", "soundfile", "scipy"])
 - For scenes with scaled units, the add-on compensates via the scene's unit scale; verify the *Unit Scale* value in *Scene Properties > Units* if delays or attenuation feel incorrect.
 
 Enjoy tracing ambisonic impulse responses directly inside Blender!
+
+
 
 
 
