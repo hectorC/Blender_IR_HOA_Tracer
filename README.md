@@ -1,4 +1,4 @@
-Code generated with AI asistance (ChatGPT). Use at your own risk. It seems to produce usable results for artistic purposes.
+[human] Code generated with AI asistance (ChatGPT). Use at your own risk. It seems to produce usable results for artistic purposes. [/human]
 
 # Ambisonic IR Tracer for Blender
 
@@ -110,7 +110,7 @@ subprocess.check_call([pybin, "-m", "pip", "install", "soundfile", "scipy"])
 - When scripting renders from the command line (`blender -b`), pass `--python-expr "import bpy; bpy.ops.airt.render_ir()"` after setting up the scene in advance.
 - For scenes with scaled units, the add-on compensates via the scene's unit scale; verify the *Unit Scale* value in *Scene Properties > Units* if delays or attenuation feel incorrect.
 
-Enjoy tracing ambisonic impulse responses directly inside Blender!
+Enjoy tracing ambisonic impulse responses directly inside Blender! (so kind of you ChatGPT, as always)
 
 
 
