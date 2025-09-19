@@ -7,8 +7,11 @@ Ambisonic IR Tracer is a Blender add-on that renders third-order ambisonic (ACN/
 ## Features
 - Third-order ambisonic encoding with configurable orientation offsets
 - Forward (stochastic) and reverse (specular) tracing modes with multi-bounce paths
-- Per-object wideband absorption, scattering, and source/receiver tagging
+- Per-object acoustic materials:
+  - Wideband coefficients and octave-band spectra (125 Hz … 8 kHz) for absorption and scattering
+  - Transmission coefficient for thin/partially transparent surfaces
 - Receiver radius capture, Russian roulette termination, and micro-roughness controls
+- Simple diffraction sampling (configurable) to account for energy bending around occlusions
 - Frequency-dependent air absorption based on ISO 9613-1 parameters
 - Optional calibration of the direct path to a 1/r amplitude reference
 - Batch averaging across multiple randomized passes with reproducible seeding
@@ -73,6 +76,9 @@ subprocess.check_call([pybin, "-m", "pip", "install", "soundfile", "scipy"])
 - **Material Preset**: Applies preset absorption and scatter values for common surfaces.
 - **Absorption**: Wideband energy absorption coefficient (0 reflective, 1 fully absorbing).
 - **Scatter**: Fraction of reflected energy sent into diffuse (cosine) lobes instead of specular reflections (0 = specular, 1 = fully diffuse).
+- **Absorption Spectrum**: Octave-band absorption values applied at these centers: 125 Hz, 250 Hz, 500 Hz, 1 kHz, 2 kHz, 4 kHz, 8 kHz. Presets populate these; the wideband value is a simple average for convenience.
+- **Scatter Spectrum**: Octave-band scattering values in the same order as above. Controls the proportion of energy routed to the diffuse lobe per band.
+- **Transmission**: Fraction of incident energy that transmits through the surface (0 opaque … 1 fully transparent). Reflection is reduced accordingly per band.
 - **Acoustic Source**: Marks the object whose origin emits sound for reverse tracing and defines the starting point for forward tracing rays.
 - **Acoustic Receiver**: Marks the listener position; impulse responses are captured at this location using the configured receiver radius.
 
@@ -88,6 +94,9 @@ subprocess.check_call([pybin, "-m", "pip", "install", "soundfile", "scipy"])
 - **WAV Subtype**: Output PCM or float encoding used by `soundfile` when writing the WAV.
 - **Specular Roughness (deg)**: Adds micro-jitter to specular reflections, broadening highlights by the given cone angle.
 - **Capture Along Segments**: When enabled, accumulates energy for partial segments that graze the receiver sphere, increasing early reflection density.
+- **Enable Diffraction**: Includes simple diffraction sampling around occluders to recover energy in shadowed paths.
+- **Diffraction Samples**: Number of diffraction directions sampled per relevant bounce (higher = more accurate, slower).
+- **Diffraction Max Angle (deg)**: Maximum angular deviation for diffraction sampling; limits how far rays can bend around edges.
 - **Random Seed**: Base RNG seed; each pass adds its index to derive a reproducible sequence. Zero leaves the RNG unseeded.
 - **Russian Roulette**: Toggles probabilistic termination of long ray paths to reduce runtime while maintaining expected energy.
 - **RR Start Bounce**: Bounce index at which Russian roulette begins evaluating termination probability.
@@ -95,6 +104,7 @@ subprocess.check_call([pybin, "-m", "pip", "install", "soundfile", "scipy"])
 - **Yaw Offset (deg)**: Rotates the ambisonic orientation about the vertical axis to align with downstream decoder conventions.
 - **Flip Z (up/down)**: Inverts the ambisonic Z axis (useful for matching systems that assume left-handed coordinates).
 - **Calibrate Direct (1/r)**: Scales the entire impulse response so the direct-path amplitude matches 1/distance, aiding distance cues.
+- **Omit Direct (reverb-only)**: Excludes the direct sound from the rendered IR so you can route dry/direct separately and use this IR purely for reverberation.
 - **Air Absorption (freq)**: Enables ISO 9613-1 based air absorption filtering per path length.
 - **Air Temp (deg C)**: Air temperature used in the absorption model.
 - **Rel Humidity (%)**: Relative humidity percentage for the absorption model.

@@ -228,6 +228,17 @@ def register_acoustic_props():
     scene.airt_air_temp_c = bpy.props.FloatProperty(name="Air temp (deg C)", default=20.0, min=-30.0, max=50.0)
     scene.airt_air_humidity = bpy.props.FloatProperty(name="Rel humidity (%)", default=50.0, min=0.0, max=100.0)
     scene.airt_air_pressure_kpa = bpy.props.FloatProperty(name="Air pressure (kPa)", default=101.325, min=80.0, max=110.0)
+    scene.airt_quick_broadband = bpy.props.BoolProperty(
+        name="Quick mode (broadband)",
+        description="Bypass multi-band path filtering for speed; writes broadband impulses",
+        default=False
+    )
+
+    scene.airt_omit_direct = bpy.props.BoolProperty(
+        name="Omit direct (reverb-only)",
+        description="Do not write the direct sound into the IR; useful for general reverb buses",
+        default=False
+    )
 
 
 def unregister_acoustic_props():
@@ -251,7 +262,7 @@ def unregister_acoustic_props():
         "airt_spec_rough_deg","airt_enable_seg_capture","airt_enable_diffraction",
         "airt_diffraction_samples","airt_diffraction_max_deg",
         "airt_yaw_offset_deg","airt_invert_z","airt_calibrate_direct",
-        "airt_air_enable","airt_air_temp_c","airt_air_humidity","airt_air_pressure_kpa"
+        "airt_air_enable","airt_air_temp_c","airt_air_humidity","airt_air_pressure_kpa","airt_quick_broadband"
     ):
         if hasattr(scene, k):
             delattr(scene, k)
@@ -317,6 +328,8 @@ class AIRT_PT_Panel(bpy.types.Panel):
             col.prop(context.scene, "airt_air_temp_c")
             col.prop(context.scene, "airt_air_humidity")
             col.prop(context.scene, "airt_air_pressure_kpa")
+        col.prop(context.scene, "airt_quick_broadband")
+        col.prop(context.scene, "airt_omit_direct")
         col.prop(context.scene, "airt_rr_enable")
         if context.scene.airt_rr_enable:
             col.prop(context.scene, "airt_rr_start")
@@ -711,8 +724,11 @@ def _trace_ir_forward(context, source, receiver, bvh, obj_map, directions):
     eps = 1e-4
 
     band_one = np.ones(_NUM_BANDS, dtype=np.float32)
+    quick = bool(getattr(context.scene, 'airt_quick_broadband', False))
     num_dirs = max(1, len(directions))
     pi4 = 4.0 * pi
+    quick = bool(getattr(context.scene, 'airt_quick_broadband', False))
+    wrote_any = False
 
     def _path_band_profile(band_amp, distance_bu):
         air = _air_attenuation_bands(distance_bu * unit_scale, context)
@@ -725,6 +741,15 @@ def _trace_ir_forward(context, source, receiver, bvh, obj_map, directions):
     def _emit_impulse(band_amp, distance_bu, incoming_dir, amp_scalar):
         if distance_bu <= 0.0:
             return False
+        if quick:
+            delay = (distance_bu / c) * sr
+            ambi = _ambisonic(incoming_dir)
+            ambi = apply_near_field_compensation(ambi, distance_bu * unit_scale, recv_r_m)
+            if not np.any(np.abs(ambi) > 1e-8):
+                ambi = np.zeros(16, dtype=np.float32)
+                ambi[0] = 1.0
+            add_impulse_simple(ir, ambi, delay, amp_scalar)
+            return True
         band_profile = _path_band_profile(band_amp, distance_bu)
         if not np.any(band_profile > 1e-8):
             return False
@@ -969,6 +994,7 @@ def _trace_ir_reverse(context, source, receiver, bvh, obj_map, directions):
     eps = 1e-4
 
     band_one = np.ones(_NUM_BANDS, dtype=np.float32)
+    quick = bool(getattr(context.scene, 'airt_quick_broadband', False))
 
     def _path_band_profile(band_amp, distance_bu):
         air = _air_attenuation_bands(distance_bu * unit_scale, context)
@@ -980,6 +1006,15 @@ def _trace_ir_reverse(context, source, receiver, bvh, obj_map, directions):
 
     def _emit_impulse(band_amp, distance_bu, incoming_dir, amp_scalar):
         if distance_bu <= 0.0:
+            return
+        if quick:
+            delay = (distance_bu / c) * sr
+            ambi = _ambisonic(incoming_dir)
+            ambi = apply_near_field_compensation(ambi, distance_bu * unit_scale, recv_r_m)
+            if not np.any(np.abs(ambi) > 1e-8):
+                ambi = np.zeros(16, dtype=np.float32)
+                ambi[0] = 1.0
+            add_impulse_simple(ir, ambi, delay, amp_scalar)
             return
         band_profile = _path_band_profile(band_amp, distance_bu)
         if not np.any(band_profile > 1e-8):
