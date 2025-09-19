@@ -14,6 +14,7 @@ import numpy as np
 import os
 import sys
 import random
+from functools import lru_cache
 
 # --- Required deps ------------------------------------------------------------
 try:
@@ -27,17 +28,72 @@ try:
 except Exception:
     lpmv = None
 
+def _band_label(freq_hz: float) -> str:
+    if freq_hz >= 1000.0:
+        return f"{int(freq_hz / 1000.0)} kHz"
+    return f"{int(freq_hz)} Hz"
+
+
+BAND_CENTERS_HZ = (125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0)
+BAND_LABELS = tuple(_band_label(f) for f in BAND_CENTERS_HZ)
+_NUM_BANDS = len(BAND_CENTERS_HZ)
+DEFAULT_ABSORPTION_SPECTRUM = tuple(0.2 for _ in BAND_CENTERS_HZ)
+DEFAULT_SCATTER_SPECTRUM = tuple(0.35 for _ in BAND_CENTERS_HZ)
+
 MATERIAL_PRESET_DATA = [
-    ('WOOD', 'Wood (panel)', 0.18, 0.35),
-    ('CONCRETE', 'Concrete', 0.05, 0.15),
-    ('CARPET', 'Carpet', 0.60, 0.60),
-    ('TILE', 'Tile', 0.07, 0.20),
-    ('BRICK', 'Brick', 0.04, 0.45)
+    (
+        'WOOD',
+        'Wood (panel)',
+        (0.18, 0.17, 0.16, 0.14, 0.12, 0.10, 0.10),
+        (0.30, 0.32, 0.34, 0.36, 0.38, 0.38, 0.38)
+    ),
+    (
+        'CONCRETE',
+        'Concrete',
+        (0.02, 0.02, 0.03, 0.04, 0.05, 0.05, 0.06),
+        (0.10, 0.12, 0.14, 0.16, 0.18, 0.18, 0.18)
+    ),
+    (
+        'CARPET',
+        'Carpet',
+        (0.08, 0.12, 0.30, 0.55, 0.65, 0.70, 0.70),
+        (0.55, 0.57, 0.60, 0.62, 0.62, 0.62, 0.62)
+    ),
+    (
+        'TILE',
+        'Tile',
+        (0.01, 0.01, 0.02, 0.02, 0.03, 0.04, 0.05),
+        (0.15, 0.17, 0.18, 0.20, 0.22, 0.22, 0.22)
+    ),
+    (
+        'BRICK',
+        'Brick',
+        (0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09),
+        (0.35, 0.37, 0.40, 0.43, 0.45, 0.45, 0.45)
+    )
 ]
-MATERIAL_PRESETS = {identifier: (absorption, scatter) for identifier, _, absorption, scatter in MATERIAL_PRESET_DATA}
-_MATERIAL_PRESET_ITEMS = [('CUSTOM', 'Custom', 'User-defined absorption and scatter')]
-for identifier, label, absorption, scatter in MATERIAL_PRESET_DATA:
-    desc = f"{label}: absorption {absorption:.2f}, scatter {scatter:.2f}"
+
+
+def _avg(values):
+    return float(sum(values)) / max(len(values), 1)
+
+
+MATERIAL_PRESETS = {
+    identifier: {
+        'absorption_spectrum': tuple(float(max(0.0, min(1.0, v))) for v in absorption),
+        'scatter_spectrum': tuple(float(max(0.0, min(1.0, v))) for v in scatter),
+        'absorption': _avg(absorption),
+        'scatter': _avg(scatter)
+    }
+    for identifier, _, absorption, scatter in MATERIAL_PRESET_DATA
+}
+_MATERIAL_PRESET_ITEMS = [('CUSTOM', 'Custom', 'User-defined absorption/scatter spectra')]
+for identifier, label, _, _ in MATERIAL_PRESET_DATA:
+    preset = MATERIAL_PRESETS[identifier]
+    desc = (
+        f"{label}: avg absorption {preset['absorption']:.2f}, "
+        f"avg scatter {preset['scatter']:.2f}"
+    )
     _MATERIAL_PRESET_ITEMS.append((identifier, label, desc))
 _MATERIAL_PRESET_GUARD = set()
 
@@ -52,8 +108,10 @@ def _update_material_preset(self, context):
     key = id(self)
     _MATERIAL_PRESET_GUARD.add(key)
     try:
-        self.absorption = values[0]
-        self.scatter = values[1]
+        self.absorption = float(values['absorption'])
+        self.scatter = float(values['scatter'])
+        self.absorption_bands = values['absorption_spectrum']
+        self.scatter_bands = values['scatter_spectrum']
     finally:
         _MATERIAL_PRESET_GUARD.discard(key)
 
@@ -86,10 +144,38 @@ def register_acoustic_props():
         max=1.0,
         update=_mark_material_custom
     )
+    bpy.types.Object.absorption_bands = bpy.props.FloatVectorProperty(
+        name="Absorption Spectrum",
+        description="Frequency-dependent absorption for octave bands (125 Hz - 8 kHz)",
+        size=_NUM_BANDS,
+        min=0.0,
+        max=1.0,
+        subtype='NONE',
+        default=DEFAULT_ABSORPTION_SPECTRUM,
+        update=_mark_material_custom
+    )
     bpy.types.Object.scatter = bpy.props.FloatProperty(
         name="Scatter",
         description="Surface scattering (0 = purely specular, 1 = fully diffuse/cosine)",
         default=0.35,
+        min=0.0,
+        max=1.0,
+        update=_mark_material_custom
+    )
+    bpy.types.Object.scatter_bands = bpy.props.FloatVectorProperty(
+        name="Scatter Spectrum",
+        description="Frequency-dependent scattering (fraction of energy sent to diffuse lobe)",
+        size=_NUM_BANDS,
+        min=0.0,
+        max=1.0,
+        subtype='NONE',
+        default=DEFAULT_SCATTER_SPECTRUM,
+        update=_mark_material_custom
+    )
+    bpy.types.Object.transmission = bpy.props.FloatProperty(
+        name="Transmission",
+        description="Portion of incident energy transmitted through the surface (0 opaque, 1 fully transparent)",
+        default=0.0,
         min=0.0,
         max=1.0,
         update=_mark_material_custom
@@ -130,6 +216,9 @@ def register_acoustic_props():
     scene.airt_rr_p = bpy.props.FloatProperty(name="RR survive prob", default=0.9, min=0.05, max=1.0)
     scene.airt_spec_rough_deg = bpy.props.FloatProperty(name="Specular roughness (deg)", default=5.0, min=0.0, max=30.0)
     scene.airt_enable_seg_capture = bpy.props.BoolProperty(name="Capture along segments", default=False)
+    scene.airt_enable_diffraction = bpy.props.BoolProperty(name="Enable diffraction", default=True)
+    scene.airt_diffraction_samples = bpy.props.IntProperty(name="Diffraction samples", default=6, min=0, max=64)
+    scene.airt_diffraction_max_deg = bpy.props.FloatProperty(name="Diffraction max angle", default=45.0, min=0.0, max=90.0)
     # Orientation controls (to match downstream decoder conventions)
     scene.airt_yaw_offset_deg = bpy.props.FloatProperty(name="Yaw offset (deg)", default=0.0, min=-180.0, max=180.0)
     scene.airt_invert_z = bpy.props.BoolProperty(name="Flip Z (up/down)", default=False)
@@ -142,7 +231,16 @@ def register_acoustic_props():
 
 
 def unregister_acoustic_props():
-    for attr in ("absorption", "scatter", "is_acoustic_source", "is_acoustic_receiver", "airt_material_preset"):
+    for attr in (
+        "absorption",
+        "absorption_bands",
+        "scatter",
+        "scatter_bands",
+        "transmission",
+        "is_acoustic_source",
+        "is_acoustic_receiver",
+        "airt_material_preset"
+    ):
         if hasattr(bpy.types.Object, attr):
             delattr(bpy.types.Object, attr)
     scene = bpy.types.Scene
@@ -150,7 +248,8 @@ def unregister_acoustic_props():
         "airt_num_rays","airt_passes","airt_max_order","airt_sr","airt_ir_seconds",
         "airt_angle_tol_deg","airt_wav_subtype","airt_seed","airt_recv_radius",
         "airt_trace_mode","airt_rr_enable","airt_rr_start","airt_rr_p",
-        "airt_spec_rough_deg","airt_enable_seg_capture",
+        "airt_spec_rough_deg","airt_enable_seg_capture","airt_enable_diffraction",
+        "airt_diffraction_samples","airt_diffraction_max_deg",
         "airt_yaw_offset_deg","airt_invert_z","airt_calibrate_direct",
         "airt_air_enable","airt_air_temp_c","airt_air_humidity","airt_air_pressure_kpa"
     ):
@@ -161,6 +260,15 @@ def unregister_acoustic_props():
 # UI Panel
 # ----------------------------------------------------------------------------
 # ----------------------------------------------------------------------------
+
+
+def _draw_band_vector(layout, obj, prop_name: str, title: str):
+    box = layout.box()
+    box.label(text=title)
+    grid = box.grid_flow(row_major=True, columns=_NUM_BANDS, even_columns=True, even_rows=True, align=True)
+    for idx, label in enumerate(BAND_LABELS):
+        grid.prop(obj, prop_name, index=idx, text=label, slider=True)
+
 
 class AIRT_PT_Panel(bpy.types.Panel):
     bl_idname = "AIRT_PT_panel"
@@ -177,7 +285,10 @@ class AIRT_PT_Panel(bpy.types.Panel):
         if obj:
             col.prop(obj, "airt_material_preset")
             col.prop(obj, "absorption")
+            _draw_band_vector(col, obj, "absorption_bands", "Absorption Spectrum (octave centers)")
             col.prop(obj, "scatter")
+            _draw_band_vector(col, obj, "scatter_bands", "Scatter Spectrum (octave centers)")
+            col.prop(obj, "transmission")
             col.prop(obj, "is_acoustic_source")
             col.prop(obj, "is_acoustic_receiver")
         layout.separator()
@@ -194,6 +305,10 @@ class AIRT_PT_Panel(bpy.types.Panel):
         col.prop(context.scene, "airt_wav_subtype")
         col.prop(context.scene, "airt_spec_rough_deg")
         col.prop(context.scene, "airt_enable_seg_capture")
+        col.prop(context.scene, "airt_enable_diffraction")
+        if context.scene.airt_enable_diffraction:
+            col.prop(context.scene, "airt_diffraction_samples")
+            col.prop(context.scene, "airt_diffraction_max_deg")
         col.prop(context.scene, "airt_yaw_offset_deg")
         col.prop(context.scene, "airt_invert_z")
         col.prop(context.scene, "airt_calibrate_direct")
@@ -240,7 +355,6 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
 
         passes = max(1, int(scene.airt_passes))
         num_rays = max(1, int(scene.airt_num_rays))
-        directions = fibonacci_sphere(num_rays)
         bvh, obj_map = build_bvh(context)
 
         ir = None
@@ -249,7 +363,7 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
                 seed = int(scene.airt_seed) + i
                 random.seed(seed)
                 np.random.seed(seed)
-            ir_i = trace_ir(context, source, receiver, bvh=bvh, obj_map=obj_map, directions=directions)
+            ir_i = trace_ir(context, source, receiver, bvh=bvh, obj_map=obj_map)
             if ir is None:
                 ir = ir_i.astype(np.float32)
             else:
@@ -302,82 +416,15 @@ def iso9613_alpha_dbpm(f_hz: float, T_c: float, rh_pct: float, p_kpa: float) -> 
     return float(max(0.0, alpha))
 
 
-def _air_kernel_for_distance(distance: float, sr: int, context) -> np.ndarray:
-    """Design a short low-pass kernel that approximates frequency-dependent air loss
-    for a given path length. We match the magnitude at 8 kHz using a biquad low-pass
-    (Q~0.707) and return its impulse response (length 8)."""
-    import numpy as _np
-    if distance <= 0.0 or not bool(getattr(context.scene, 'airt_air_enable', True)):
-        return _np.array([1.0], dtype=_np.float32)
-    T = float(getattr(context.scene, 'airt_air_temp_c', 20.0))
-    RH = float(getattr(context.scene, 'airt_air_humidity', 50.0))
-    Pk = float(getattr(context.scene, 'airt_air_pressure_kpa', 101.325))
-    f_ref = 8000.0
-    alpha_dbpm = iso9613_alpha_dbpm(f_ref, T, RH, Pk)
-    # Target gain at f_ref for this path length
-    target_gain = 10.0 ** (-(alpha_dbpm * distance) / 20.0)
-    target_gain = float(max(1e-6, min(1.0, target_gain)))
-
-    # RBJ biquad low-pass, solve for fc s.t. |H(f_ref)|~target_gain
-    def biquad_coeffs(fc, fs, Q=0.707):
-        from math import sin, cos, pi
-        w0 = 2.0 * pi * (fc / fs)
-        alpha = sin(w0) / (2.0 * Q)
-        cw = cos(w0)
-        b0 = (1.0 - cw) * 0.5
-        b1 = 1.0 - cw
-        b2 = (1.0 - cw) * 0.5
-        a0 = 1.0 + alpha
-        a1 = -2.0 * cw
-        a2 = 1.0 - alpha
-        b0 /= a0; b1 /= a0; b2 /= a0; a1 /= a0; a2 /= a0
-        return b0, b1, b2, a1, a2
-
-    def biquad_mag(b0,b1,b2,a1,a2,f,fs):
-        from math import cos, sin, pi
-        w = 2.0 * pi * (f / fs)
-        cw = cos(w); sw = sin(w)
-        # H(e^jw) magnitude
-        num_r = b0 + b1 * cos(w) + b2 * cos(2*w)
-        num_i = b1 * sin(w) + b2 * sin(2*w)
-        den_r = 1.0 + a1 * cos(w) + a2 * cos(2*w)
-        den_i = a1 * sin(w) + a2 * sin(2*w)
-        num = num_r*num_r + num_i*num_i
-        den = den_r*den_r + den_i*den_i
-        return _np.sqrt(max(1e-20, num / max(1e-20, den)))
-
-    # Binary search fc
-    fs = float(sr)
-    lo, hi = 50.0, min(f_ref, 0.45*fs)
-    b0=b1=b2=a1=a2=0.0
-    for _ in range(30):
-        fc = 0.5 * (lo + hi)
-        b0,b1,b2,a1,a2 = biquad_coeffs(fc, fs)
-        mag = biquad_mag(b0,b1,b2,a1,a2, f_ref, fs)
-        if mag > target_gain:
-            # Need lower cutoff to reduce HF more
-            hi = fc
-        else:
-            lo = fc
-    # Generate short impulse response (length 8)
-    L = 8
-    x0 = 1.0
-    y = _np.zeros(L, dtype=_np.float32)
-    x1=x2=y1=y2=0.0
-    for n in range(L):
-        x = x0 if n == 0 else 0.0
-        y_n = b0*x + b1*x1 + b2*x2 - a1*y1 - a2*y2
-        y[n] = y_n
-        x2, x1 = x1, x
-        y2, y1 = y1, y_n
-    # Normalize DC (sum of impulse) to 1 so overall gain at low freq is unchanged
-    s = float(_np.sum(y))
-    if s > 1e-9:
-        y /= s
-    return y
-
-
 # ----------------------------------------------------------------------------
+
+def _speed_of_sound_ms(context):
+    """Speed of sound in air [m/s] using a humidity-aware approximation (Cramer's formula)."""
+    scene = getattr(context, "scene", None) or bpy.context.scene
+    temp_c = float(getattr(scene, 'airt_air_temp_c', 20.0))
+    rh = float(getattr(scene, 'airt_air_humidity', 50.0))
+    return float(331.3 + 0.606 * temp_c + 0.0124 * rh)
+
 
 def _speed_of_sound_bu(context):
     """Convert physical speed of sound to Blender units using the scene scale."""
@@ -385,7 +432,8 @@ def _speed_of_sound_bu(context):
     unit_settings = getattr(scene, "unit_settings", None)
     scale_length = getattr(unit_settings, "scale_length", 1.0) if unit_settings else 1.0
     unit_scale = float(scale_length or 1.0)
-    return 343.0 / max(unit_scale, 1e-9)
+    c_ms = _speed_of_sound_ms(context)
+    return c_ms / max(unit_scale, 1e-9)
 
 
 def calibrate_direct_1_over_r(ir: np.ndarray, context, source, receiver):
@@ -484,6 +532,29 @@ def reflect(vec, normal):
     return (vec - 2.0 * vec.dot(normal) * normal).normalized()
 
 
+def _get_obj_spectrum(obj, vec_attr, scalar_attr, default_vec):
+    if obj is None:
+        return np.array(default_vec, dtype=np.float32)
+    if hasattr(obj, vec_attr):
+        values = getattr(obj, vec_attr)
+        if values is not None and len(values) == _NUM_BANDS:
+            return np.clip(np.array(values, dtype=np.float32), 0.0, 1.0)
+    scalar = float(getattr(obj, scalar_attr, default_vec[0])) if obj else default_vec[0]
+    return np.clip(np.full(_NUM_BANDS, scalar, dtype=np.float32), 0.0, 1.0)
+
+
+def get_absorption_spectrum(obj):
+    return _get_obj_spectrum(obj, 'absorption_bands', 'absorption', DEFAULT_ABSORPTION_SPECTRUM)
+
+
+def get_scatter_spectrum(obj):
+    return _get_obj_spectrum(obj, 'scatter_bands', 'scatter', DEFAULT_SCATTER_SPECTRUM)
+
+
+def get_transmission_coeff(obj):
+    return float(np.clip(getattr(obj, 'transmission', 0.0) if obj else 0.0, 0.0, 1.0))
+
+
 def los_clear(p0, p1, bvh, eps=1e-4):
     if bvh is None:
         return True
@@ -499,31 +570,81 @@ def los_clear(p0, p1, bvh, eps=1e-4):
 
 
 def add_impulse(ir, ambi_vec, delay_samples, amp):
-    # Original 2-tap fractional delay (kept for fallback)
+    _add_filtered_impulse(ir, ambi_vec, delay_samples, amp, np.ones(_NUM_BANDS, dtype=np.float32), 48000)
+
+
+def _air_attenuation_bands(distance_m, context):
+    if distance_m <= 0.0 or not bool(getattr(context.scene, 'airt_air_enable', True)):
+        return np.ones(_NUM_BANDS, dtype=np.float32)
+    temp = float(getattr(context.scene, 'airt_air_temp_c', 20.0))
+    rh = float(getattr(context.scene, 'airt_air_humidity', 50.0))
+    pk = float(getattr(context.scene, 'airt_air_pressure_kpa', 101.325))
+    gains = []
+    for f in BAND_CENTERS_HZ:
+        alpha_dbpm = iso9613_alpha_dbpm(f, temp, rh, pk)
+        gains.append(10.0 ** (-(alpha_dbpm * distance_m) / 20.0))
+    return np.clip(np.array(gains, dtype=np.float32), 1e-4, 1.0)
+
+
+@lru_cache(maxsize=4096)
+def _band_kernel_cache(band_key, sr, kernel_len):
+    band_profile = np.array(band_key, dtype=np.float32)
+    kernel_len = int(kernel_len)
+    sr = max(1000, int(sr))
+    n_fft = max(64, 1 << int(np.ceil(np.log2(kernel_len * 4))))
+    freq_axis = np.linspace(0.0, sr * 0.5, n_fft // 2 + 1, dtype=np.float32)
+    mags = np.empty_like(freq_axis)
+    mags[0] = float(band_profile[0])
+    if freq_axis.shape[0] > 1:
+        log_freq = np.log10(np.maximum(freq_axis[1:], 1.0))
+        log_bands = np.log10(np.array(BAND_CENTERS_HZ, dtype=np.float32))
+        interp = np.interp(log_freq, log_bands, band_profile, left=band_profile[0], right=band_profile[-1])
+        mags[1:] = interp
+    mag_full = np.concatenate([mags, mags[-2:0:-1]])
+    ir = np.fft.irfft(mag_full, n=n_fft).real[:kernel_len]
+    if kernel_len >= 4:
+        window = np.hanning(kernel_len * 2)[kernel_len:kernel_len * 2]
+        ir *= window
+    s = float(np.sum(ir))
+    target_dc = mags[0]
+    if abs(s) > 1e-12:
+        ir *= target_dc / s
+    return ir.astype(np.float32)
+
+
+def _design_band_kernel(band_profile, sr, kernel_len=16):
+    key = tuple(float(round(float(v), 5)) for v in band_profile)
+    return _band_kernel_cache(key, int(sr), int(kernel_len))
+
+
+def _add_filtered_impulse(ir, ambi_vec, delay_samples, amp, band_profile, sr, kernel_len=16):
+    kernel = _design_band_kernel(band_profile, sr, kernel_len)
+    base = int(np.floor(delay_samples))
+    frac = float(delay_samples - base)
+    weights = ((base, 1.0 - frac), (base + 1, frac))
+    wrote = False
+    for start, w in weights:
+        if w <= 0.0:
+            continue
+        for k, kv in enumerate(kernel):
+            idx = start + k
+            if 0 <= idx < ir.shape[1]:
+                ir[:, idx] += ambi_vec * (amp * w * kv)
+                wrote = True
+    return wrote
+
+
+def add_filtered_impulse(ir, ambi_vec, delay_samples, amp, band_profile, sr):
+    return _add_filtered_impulse(ir, ambi_vec, delay_samples, amp, band_profile, sr)
+
+
+def add_impulse_simple(ir, ambi_vec, delay_samples, amp):
     n = int(np.floor(delay_samples))
     frac = float(delay_samples - n)
     if 0 <= n < ir.shape[1]:
         ir[:, n] += ambi_vec * amp * (1.0 - frac)
     if 0 <= n + 1 < ir.shape[1]:
         ir[:, n + 1] += ambi_vec * amp * frac
-
-
-def add_impulse_air(ir, ambi_vec, delay_samples, amp, distance, context, sr):
-    """Fractional-delay impulse with optional air-absorption kernel per path length.
-    Uses a short low-pass kernel to approximate frequency-dependent air loss."""
-    kern = _air_kernel_for_distance(float(distance), int(sr), context)
-    n0 = int(np.floor(delay_samples))
-    frac = float(delay_samples - n0)
-    # Split fractional delay into two starting indices, each convolved with kernel
-    for base, w in ((n0, 1.0 - frac), (n0 + 1, frac)):
-        if w <= 0.0:
-            continue
-        start = base
-        for k, kv in enumerate(kern):
-            idx = start + k
-            if 0 <= idx < ir.shape[1]:
-                ir[:, idx] += ambi_vec * (amp * w * kv)
-    return
 
 
 def segment_hits_sphere(p0, p1, center, radius):
@@ -557,7 +678,7 @@ def trace_ir(context, source, receiver, bvh=None, obj_map=None, directions=None)
         bvh, obj_map = build_bvh(context)
     if directions is None:
         num_rays = max(1, int(context.scene.airt_num_rays))
-        directions = fibonacci_sphere(num_rays)
+        directions = generate_ray_directions(num_rays)
     mode = context.scene.airt_trace_mode
     if mode == 'FORWARD':
         return _trace_ir_forward(context, source, receiver, bvh, obj_map, directions)
@@ -567,7 +688,7 @@ def trace_ir(context, source, receiver, bvh=None, obj_map=None, directions=None)
 
 def _trace_ir_forward(context, source, receiver, bvh, obj_map, directions):
     num_channels = 16
-    sr = context.scene.airt_sr
+    sr = int(context.scene.airt_sr)
     ir_length = int(context.scene.airt_ir_seconds * sr)
     ir = np.zeros((num_channels, ir_length), dtype=np.float32)
 
@@ -575,47 +696,125 @@ def _trace_ir_forward(context, source, receiver, bvh, obj_map, directions):
     unit_settings = getattr(scene, "unit_settings", None)
     unit_scale = float(getattr(unit_settings, "scale_length", 1.0) or 1.0)
     c = _speed_of_sound_bu(context)
-    max_bounces = context.scene.airt_max_order
+    max_bounces = int(context.scene.airt_max_order)
     tol_rad = context.scene.airt_angle_tol_deg * pi / 180.0
     recv_r_m = max(1e-6, float(context.scene.airt_recv_radius))
     recv_r = recv_r_m / max(unit_scale, 1e-9)
     rr_enable = bool(context.scene.airt_rr_enable)
     rr_start = int(context.scene.airt_rr_start)
-    rr_p = float(context.scene.airt_rr_p)
+    rr_survive = max(0.05, min(1.0, float(context.scene.airt_rr_p)))
     seg_capture = bool(context.scene.airt_enable_seg_capture)
     rough_rad = max(0.0, float(context.scene.airt_spec_rough_deg)) * pi / 180.0
+    enable_diffraction = bool(getattr(context.scene, 'airt_enable_diffraction', False))
+    diff_samples = int(getattr(context.scene, 'airt_diffraction_samples', 0))
+    diff_max_angle = max(0.0, float(getattr(context.scene, 'airt_diffraction_max_deg', 40.0))) * pi / 180.0
     eps = 1e-4
 
-    def refl_amp(absorb):
-        # Absorption is an ENERGY coefficient; convert to AMPLITUDE reflectivity
-        a = max(0.0, min(1.0, float(absorb)))
-        return sqrt(1.0 - a)
+    band_one = np.ones(_NUM_BANDS, dtype=np.float32)
+    num_dirs = max(1, len(directions))
+    pi4 = 4.0 * pi
+
+    def _path_band_profile(band_amp, distance_bu):
+        air = _air_attenuation_bands(distance_bu * unit_scale, context)
+        profile = np.array(band_amp, dtype=np.float32) * air
+        return np.clip(profile, 0.0, 1e6)
+
+    def _ambisonic(direction):
+        return encode_ambisonics_3rd_order(_apply_orientation(direction, context))
+
+    def _emit_impulse(band_amp, distance_bu, incoming_dir, amp_scalar):
+        if distance_bu <= 0.0:
+            return False
+        band_profile = _path_band_profile(band_amp, distance_bu)
+        if not np.any(band_profile > 1e-8):
+            return False
+        delay = (distance_bu / c) * sr
+        ambi = _ambisonic(incoming_dir)
+        ambi = apply_near_field_compensation(ambi, distance_bu * unit_scale, recv_r_m)
+        if not np.any(np.abs(ambi) > 1e-8):
+            ambi = np.zeros(16, dtype=np.float32)
+            ambi[0] = 1.0
+        wrote = add_filtered_impulse(ir, ambi, delay, amp_scalar, band_profile, sr)
+        if not wrote:
+            add_impulse_simple(ir, ambi, delay, amp_scalar)
+            wrote = True
+        return wrote
+
+    def _jitter_spec(direction):
+        v = direction.normalized()
+        if rough_rad <= 1e-6:
+            return v
+        if abs(v.x) < 0.5:
+            helper = mathutils.Vector((1.0, 0.0, 0.0))
+        else:
+            helper = mathutils.Vector((0.0, 1.0, 0.0))
+        t = v.cross(helper).normalized()
+        b = v.cross(t).normalized()
+        u = random.random()
+        vphi = 2.0 * pi * random.random()
+        cos_a = 1.0 - u * (1.0 - cos(rough_rad))
+        sin_a = sqrt(max(0.0, 1.0 - cos_a * cos_a))
+        return (v * cos_a + t * (sin_a * cos(vphi)) + b * (sin_a * sin(vphi))).normalized()
+
+    def _add_diffraction(hit_point, normal, dir_in, to_receiver_vec, throughput_band, refl_amp_band, diff_frac_band, path_len_hit):
+        if not enable_diffraction or diff_samples <= 0 or diff_max_angle <= 0.0:
+            return
+        axis = dir_in.cross(normal)
+        if axis.length < 1e-6:
+            axis = normal.cross(mathutils.Vector((0.0, 0.0, 1.0)))
+            if axis.length < 1e-6:
+                axis = mathutils.Vector((1.0, 0.0, 0.0))
+        axis.normalize()
+        base_dir = to_receiver_vec.normalized()
+        for _ in range(diff_samples):
+            angle = diff_max_angle * random.random()
+            sign = -1.0 if random.random() < 0.5 else 1.0
+            rot = mathutils.Matrix.Rotation(sign * angle, 3, axis)
+            sample_dir = (rot @ base_dir).normalized()
+            far = hit_point + sample_dir * 100.0
+            if not los_clear(hit_point + normal * eps, far, bvh, eps=eps):
+                continue
+            got, t_hit, _ = segment_hits_sphere(hit_point, far, receiver, recv_r)
+            if not got:
+                continue
+            seg_dist = (far - hit_point).length * t_hit
+            total_dist = path_len_hit + seg_dist
+            if total_dist <= 0.0:
+                continue
+            angle_factor = np.exp(-angle / max(diff_max_angle, 1e-6))
+            diff_gain = np.sqrt(np.clip(diff_frac_band, 0.0, 1.0)) * angle_factor
+            band_amp = throughput_band * refl_amp_band * diff_gain
+            if not np.any(band_amp > 1e-6):
+                continue
+            incoming = (hit_point - receiver).normalized()
+            amp_scalar = 1.0 / max(total_dist, recv_r)
+            _emit_impulse(band_amp, total_dist, incoming, amp_scalar)
+            break
 
     # Direct path (source -> receiver)
     if los_clear(source, receiver, bvh):
         dvec = receiver - source
-        dist = dvec.length
-        if dist > 0:
-            incoming = (source - receiver).normalized()  # DoA at receiver
-            ambi = encode_ambisonics_3rd_order(_apply_orientation(incoming, context))
-            delay = (dist / c) * sr
-            amp = 1.0 / max(dist, recv_r)
-            add_impulse_air(ir, ambi, delay, amp, dist, context, sr)
+        dist_direct = dvec.length
+        if dist_direct > 0.0:
+            incoming = (source - receiver).normalized()
+            amp_scalar = 1.0 / max(dist_direct, recv_r)
+            _emit_impulse(band_one, dist_direct, incoming, amp_scalar)
+
+    if bvh is None:
+        return ir
 
     for d in directions:
-        dirn = mathutils.Vector(d).normalized()
+        dirn = mathutils.Vector(d)
+        if dirn.length == 0.0:
+            continue
+        dirn.normalize()
         pos = source.copy()
+        throughput = band_one.copy()
         path_len = 0.0
-        refl_prod = 1.0  # product of per-bounce reflection amplitude (sqrt(1-alpha))
         bounce = 0
-        while True:
-            if bvh is None or bounce > max_bounces:
-                break
-
-            # Cast to next surface
+        while bounce <= max_bounces:
             hit, normal, index, dist = bvh.ray_cast(pos + dirn * eps, dirn)
             if hit is None or index is None:
-                # Optional capture along a far segment to catch near misses
                 if seg_capture:
                     far = pos + dirn * 100.0
                     got, t_hit, _ = segment_hits_sphere(pos, far, receiver, recv_r)
@@ -623,207 +822,360 @@ def _trace_ir_forward(context, source, receiver, bvh, obj_map, directions):
                         seg_len = (far - pos).length * t_hit
                         total_dist = path_len + seg_len
                         incoming = (-dirn).normalized()
-                        ambi = encode_ambisonics_3rd_order(_apply_orientation(incoming, context))
-                        # Geometric acceptance: projected area over sphere, convert energy -> pressure via sqrt
                         area = pi * recv_r * recv_r
-                        view = area / max(4.0 * pi * total_dist * total_dist, 1e-9)
-                        amp = refl_prod * sqrt(view) / max(total_dist, recv_r)
-                        delay = (total_dist / c) * sr
-                        add_impulse_air(ir, ambi, delay, amp, total_dist, context, sr)
+                        view = area / max(pi4 * total_dist * total_dist, 1e-9)
+                        amp_scalar = sqrt(max(view, 0.0)) / max(total_dist, recv_r)
+                        wrote_any = _emit_impulse(throughput, total_dist, incoming, amp_scalar) or wrote_any
                 break
 
+            seg_len = float(dist)
+            total_dist_hit = path_len + seg_len
+            hit_point = mathutils.Vector(hit)
+            normal = mathutils.Vector(normal)
             if normal.dot(dirn) > 0.0:
                 normal = -normal
 
-            seg_len = float(dist)
-            d_to_hit = path_len + seg_len
-            next_pos = hit
+            hit_obj = obj_map[index] if 0 <= index < len(obj_map) else None
+            absorption = get_absorption_spectrum(hit_obj)
+            scatter_spec = get_scatter_spectrum(hit_obj)
+            transmission_coeff = get_transmission_coeff(hit_obj)
+            transmission_spec = np.clip(np.full(_NUM_BANDS, transmission_coeff, dtype=np.float32), 0.0, 1.0)
+            refl_spec = np.clip(1.0 - absorption - transmission_spec, 0.0, 1.0)
+            if not np.any(refl_spec > 1e-6) and transmission_coeff <= 1e-6:
+                break
 
-            # Segment capture along pos->hit (improves early density)
+            spec_frac = np.clip(1.0 - scatter_spec, 0.0, 1.0)
+            diff_frac = np.clip(scatter_spec, 0.0, 1.0)
+            refl_amp_band = np.sqrt(refl_spec)
+            spec_amp_band = refl_amp_band * np.sqrt(np.maximum(spec_frac, 1e-6))
+            diff_amp_band = refl_amp_band * np.sqrt(np.maximum(diff_frac, 1e-6))
+            trans_amp_band = np.sqrt(transmission_spec)
+
             if seg_capture:
-                got, t_hit, _ = segment_hits_sphere(pos, next_pos, receiver, recv_r)
+                got, t_hit, _ = segment_hits_sphere(pos, hit_point, receiver, recv_r)
                 if got:
                     partial_len = seg_len * t_hit
                     total_dist = path_len + partial_len
                     incoming = (-dirn).normalized()
-                    ambi = encode_ambisonics_3rd_order(_apply_orientation(incoming, context))
-                    # Geometric acceptance: projected area over sphere, convert energy -> pressure via sqrt
                     area = pi * recv_r * recv_r
-                    view = area / max(4.0 * pi * total_dist * total_dist, 1e-9)
-                    amp = refl_prod * sqrt(view) / max(total_dist, recv_r)
-                    delay = (total_dist / c) * sr
-                    add_impulse_air(ir, ambi, delay, amp, total_dist, context, sr)
+                    view = area / max(pi4 * total_dist * total_dist, 1e-9)
+                    amp_scalar = sqrt(max(view, 0.0)) / max(total_dist, recv_r)
+                    wrote_any = _emit_impulse(throughput, total_dist, incoming, amp_scalar) or wrote_any
 
-            # Path connection from hit to receiver (LOS)
-            hit_obj = obj_map[index] if 0 <= index < len(obj_map) else None
-            absorb = float(getattr(hit_obj, 'absorption', 0.2)) if hit_obj else 0.2
-            scatter = float(getattr(hit_obj, 'scatter', 0.0)) if hit_obj else 0.0
-            r_amp = refl_amp(absorb)
-
-            to_rcv = (receiver - hit)
+            to_rcv = receiver - hit_point
             dist_rcv = to_rcv.length
-            if dist_rcv > 0 and los_clear(hit + normal * eps, receiver, bvh, eps=eps):
-                to_rcv_dir = to_rcv.normalized()
-                # Specular lobe weight (dimensionless gain)
-                req_out = reflect(dirn, normal)
-                cosang = max(-1.0, min(1.0, req_out.dot(to_rcv_dir)))
-                dtheta = acos(cosang)
-                weight_spec = (1.0 - scatter) * np.exp(-(dtheta / max(tol_rad, 1e-6))**2)
-                # Diffuse lobe
-                cos_i = max(0.0, (-dirn).dot(normal))
-                weight_diff = scatter * (cos_i / pi)
-                total_weight = max(0.0, min(1.0, weight_spec + weight_diff))
-                if total_weight > 1e-6:
-                    total_dist = d_to_hit + dist_rcv
-                    incoming = (hit - receiver).normalized()
-                    ambi = encode_ambisonics_3rd_order(_apply_orientation(incoming, context))
-                    # Treat lobe weight as a POWER factor; convert to amplitude via sqrt
-                    amp = (refl_prod * r_amp * sqrt(max(total_weight, 0.0))) / max(total_dist, recv_r)
-                    delay = (total_dist / c) * sr
-                    add_impulse_air(ir, ambi, delay, amp, total_dist, context, sr)
+            if dist_rcv > 0.0:
+                has_los = los_clear(hit_point + normal * eps, receiver, bvh, eps=eps)
+                if has_los:
+                    to_rcv_dir = to_rcv.normalized()
+                    req_out = reflect(dirn, normal)
+                    cosang = max(-1.0, min(1.0, req_out.dot(to_rcv_dir)))
+                    dtheta = acos(cosang)
+                    spec_lobe = np.exp(-(dtheta / max(tol_rad, 1e-6)) ** 2)
+                    cos_i = max(0.0, (-dirn).dot(normal))
+                    diff_lobe = cos_i / pi
+                    total_weight_band = np.clip(spec_frac * spec_lobe + diff_frac * diff_lobe, 0.0, 1.0)
+                    if np.any(total_weight_band > 1e-6):
+                        band_amp = throughput * refl_amp_band * np.sqrt(total_weight_band)
+                        total_dist = total_dist_hit + dist_rcv
+                        amp_scalar = 1.0 / max(total_dist, recv_r)
+                        incoming = (hit_point - receiver).normalized()
+                        wrote_any = _emit_impulse(band_amp, total_dist, incoming, amp_scalar) or wrote_any
+                else:
+                    _add_diffraction(hit_point, normal, dirn, to_rcv, throughput, refl_amp_band, diff_frac, total_dist_hit)
 
-            # Update accumulators after the hit for the next bounce
-            path_len = d_to_hit
-            refl_prod *= r_amp
-            if abs(refl_prod) < 1e-8:
+            path_len = total_dist_hit
+            base_throughput = throughput.copy()
+            trans_prob = min(0.999, max(0.0, transmission_coeff))
+            remaining = max(0.0, 1.0 - trans_prob)
+            diff_prob = remaining * float(np.clip(np.mean(diff_frac), 0.0, 1.0))
+            spec_prob = max(remaining - diff_prob, 0.0)
+
+            rnd = random.random()
+            next_dir = None
+            new_throughput = None
+            offset = normal * eps
+
+            if trans_prob > 1e-6 and rnd < trans_prob:
+                next_dir = dirn.normalized()
+                new_throughput = base_throughput * trans_amp_band
+                offset = -normal * eps
+            else:
+                rnd -= trans_prob
+                if diff_prob > 1e-6 and rnd < diff_prob:
+                    candidate = None
+                    cos_out = 0.0
+                    for _ in range(8):
+                        cand = cosine_weighted_hemisphere(normal)
+                        cos_out = max(0.0, cand.dot(normal))
+                        if cos_out > 1e-6:
+                            candidate = cand
+                            break
+                    if candidate is None:
+                        break
+                    next_dir = candidate.normalized()
+                    new_throughput = base_throughput * diff_amp_band
+                else:
+                    if spec_prob <= 1e-6 or np.all(spec_amp_band < 1e-6):
+                        break
+                    spec_dir = reflect(dirn, normal)
+                    spec_dir = _jitter_spec(spec_dir)
+                    next_dir = spec_dir.normalized()
+                    new_throughput = base_throughput * spec_amp_band
+
+            if new_throughput is None or next_dir is None:
                 break
 
-            # Russian roulette termination to allow large bounce counts (unbiased via 1/p)
-            if rr_enable and bounce >= rr_start:
-                if random.random() > rr_p:
-                    break
-                # NOTE: no 1/p compensation in amplitude-domain IR to avoid large late spikes
+            new_throughput = np.nan_to_num(new_throughput, nan=0.0, posinf=0.0, neginf=0.0)
+            new_throughput = np.clip(new_throughput, 0.0, 1e6)
+            throughput = new_throughput.astype(np.float32)
 
-            # Sample outgoing direction
-            spec_dir = reflect(dirn, normal)
-            # Apply micro-roughness jitter to specular direction
-            if rough_rad > 1e-6:
-                v = spec_dir.normalized()
-                if abs(v.x) < 0.5:
-                    helper = mathutils.Vector((1.0, 0.0, 0.0))
-                else:
-                    helper = mathutils.Vector((0.0, 1.0, 0.0))
-                t = v.cross(helper).normalized()
-                b = v.cross(t).normalized()
-                u = random.random()
-                vphi = 2.0 * pi * random.random()
-                cos_a = 1.0 - u * (1.0 - cos(rough_rad))
-                sin_a = sqrt(max(0.0, 1.0 - cos_a * cos_a))
-                jittered = (v * cos_a + t * (sin_a * cos(vphi)) + b * (sin_a * sin(vphi))).normalized()
-                spec_dir = jittered
+            if np.max(throughput) < 1e-6:
+                break
 
-            if scatter <= 1e-6:
-                dirn = spec_dir
-            elif scatter >= 1.0 - 1e-6:
-                dirn = cosine_weighted_hemisphere(normal)
-            else:
-                if random.random() < scatter:
-                    dirn = cosine_weighted_hemisphere(normal)
-                else:
-                    dirn = spec_dir
-
-            pos = hit + normal * eps
             bounce += 1
+            pos = hit_point + offset + next_dir * (eps * 0.5)
+            dirn = next_dir
 
-    # Keep absolute scale; downstream convolvers can normalize if needed.
+            if rr_enable and bounce >= rr_start:
+                if random.random() > rr_survive:
+                    break
+                # Keep amplitude-domain IR stable by avoiding 1/p rescaling here.
+
+    if not wrote_any:
+        print(f"[AIRT] forward trace produced no contributions (dirs={len(directions)}, bvh={'None' if bvh is None else 'BVH'})")
     return ir
-
-
 def _trace_ir_reverse(context, source, receiver, bvh, obj_map, directions):
-    # Existing reverse implementation (specular/diffuse with LOS-to-source)
-    num_channels = 16  # 3rd order HOA (ACN)
-    sr = context.scene.airt_sr
+    num_channels = 16
+    sr = int(context.scene.airt_sr)
     ir_length = int(context.scene.airt_ir_seconds * sr)
     ir = np.zeros((num_channels, ir_length), dtype=np.float32)
 
+    scene = context.scene
+    unit_settings = getattr(scene, "unit_settings", None)
+    unit_scale = float(getattr(unit_settings, "scale_length", 1.0) or 1.0)
     c = _speed_of_sound_bu(context)
     tol_rad = context.scene.airt_angle_tol_deg * pi / 180.0
-
-    def refl_amp(absorb):
-        a = max(0.0, min(1.0, float(absorb)))
-        return sqrt(1.0 - a)
-
-    max_order = context.scene.airt_max_order
+    max_order = int(context.scene.airt_max_order)
+    rr_enable = bool(context.scene.airt_rr_enable)
+    rr_start = int(context.scene.airt_rr_start)
+    rr_survive = max(0.05, min(1.0, float(context.scene.airt_rr_p)))
+    recv_r_m = max(1e-6, float(context.scene.airt_recv_radius))
+    recv_r = recv_r_m / max(unit_scale, 1e-9)
+    rough_rad = max(0.0, float(context.scene.airt_spec_rough_deg)) * pi / 180.0
+    enable_diffraction = bool(getattr(context.scene, 'airt_enable_diffraction', False))
+    diff_samples = int(getattr(context.scene, 'airt_diffraction_samples', 0))
+    diff_max_angle = max(0.0, float(getattr(context.scene, 'airt_diffraction_max_deg', 40.0))) * pi / 180.0
     eps = 1e-4
 
-    # Direct path (order 0)
+    band_one = np.ones(_NUM_BANDS, dtype=np.float32)
+
+    def _path_band_profile(band_amp, distance_bu):
+        air = _air_attenuation_bands(distance_bu * unit_scale, context)
+        profile = np.array(band_amp, dtype=np.float32) * air
+        return np.clip(profile, 0.0, 1e6)
+
+    def _ambisonic(direction):
+        return encode_ambisonics_3rd_order(_apply_orientation(direction, context))
+
+    def _emit_impulse(band_amp, distance_bu, incoming_dir, amp_scalar):
+        if distance_bu <= 0.0:
+            return
+        band_profile = _path_band_profile(band_amp, distance_bu)
+        if not np.any(band_profile > 1e-8):
+            return
+        delay = (distance_bu / c) * sr
+        ambi = _ambisonic(incoming_dir)
+        ambi = apply_near_field_compensation(ambi, distance_bu * unit_scale, recv_r_m)
+        if not np.any(np.abs(ambi) > 1e-8):
+            ambi = np.zeros(16, dtype=np.float32)
+            ambi[0] = 1.0
+        wrote = add_filtered_impulse(ir, ambi, delay, amp_scalar, band_profile, sr)
+        if not wrote:
+            add_impulse_simple(ir, ambi, delay, amp_scalar)
+
+    def _jitter_spec(direction):
+        v = direction.normalized()
+        if rough_rad <= 1e-6:
+            return v
+        if abs(v.x) < 0.5:
+            helper = mathutils.Vector((1.0, 0.0, 0.0))
+        else:
+            helper = mathutils.Vector((0.0, 1.0, 0.0))
+        t = v.cross(helper).normalized()
+        b = v.cross(t).normalized()
+        u = random.random()
+        vphi = 2.0 * pi * random.random()
+        cos_a = 1.0 - u * (1.0 - cos(rough_rad))
+        sin_a = sqrt(max(0.0, 1.0 - cos_a * cos_a))
+        return (v * cos_a + t * (sin_a * cos(vphi)) + b * (sin_a * sin(vphi))).normalized()
+
+    def _add_diffraction(hit_point, normal, dir_in, to_target_vec, throughput_band, refl_amp_band, diff_frac_band, path_len_hit, incoming_dir):
+        if not enable_diffraction or diff_samples <= 0 or diff_max_angle <= 0.0:
+            return
+        axis = dir_in.cross(normal)
+        if axis.length < 1e-6:
+            axis = normal.cross(mathutils.Vector((0.0, 0.0, 1.0)))
+            if axis.length < 1e-6:
+                axis = mathutils.Vector((1.0, 0.0, 0.0))
+        axis.normalize()
+        base_dir = to_target_vec.normalized()
+        src_radius = max(recv_r, 0.05)
+        for _ in range(diff_samples):
+            angle = diff_max_angle * random.random()
+            sign = -1.0 if random.random() < 0.5 else 1.0
+            rot = mathutils.Matrix.Rotation(sign * angle, 3, axis)
+            sample_dir = (rot @ base_dir).normalized()
+            far = hit_point + sample_dir * 100.0
+            if not los_clear(hit_point + normal * eps, far, bvh, eps=eps):
+                continue
+            got, t_hit, _ = segment_hits_sphere(hit_point, far, source, src_radius)
+            if not got:
+                continue
+            seg_dist = (far - hit_point).length * t_hit
+            total_dist = path_len_hit + seg_dist
+            if total_dist <= 0.0:
+                continue
+            angle_factor = np.exp(-angle / max(diff_max_angle, 1e-6))
+            diff_gain = np.sqrt(np.clip(diff_frac_band, 0.0, 1.0)) * angle_factor
+            band_amp = throughput_band * refl_amp_band * diff_gain
+            if not np.any(band_amp > 1e-6):
+                continue
+            amp_scalar = 1.0 / max(total_dist, recv_r)
+            _emit_impulse(band_amp, total_dist, incoming_dir, amp_scalar)
+            break
+
+    # Direct path (source -> receiver)
     if los_clear(source, receiver, bvh):
-        dvec = source - receiver
-        dist = dvec.length
-        if dist > 0:
-            incoming_dir = dvec.normalized()
-            ambi = encode_ambisonics_3rd_order(_apply_orientation(incoming_dir, context))
-            delay = (dist / c) * sr
-            amp = 1.0 / max(dist, 1e-6)
-            add_impulse_air(ir, ambi, delay, amp, dist, context, sr)
+        dvec = receiver - source
+        dist_direct = dvec.length
+        if dist_direct > 0.0:
+            incoming = (source - receiver).normalized()
+            amp_scalar = 1.0 / max(dist_direct, recv_r)
+            _emit_impulse(band_one, dist_direct, incoming, amp_scalar)
+
+    if bvh is None:
+        return ir
 
     for d in directions:
-        first_dir = mathutils.Vector(d).normalized()  # from receiver outward
+        first_dir = mathutils.Vector(d)
+        if first_dir.length == 0.0:
+            continue
+        first_dir.normalize()
         pos = receiver.copy()
         dirn = first_dir.copy()
+        throughput = band_one.copy()
         path_len = 0.0
-        energy = 1.0
+        bounce = 0
+        incoming_dir = (-first_dir).normalized()
 
-        for order in range(1, max_order + 1):
-            if bvh is None:
-                break
+        while bounce < max_order:
             hit, normal, index, dist = bvh.ray_cast(pos + dirn * eps, dirn)
             if hit is None or index is None:
                 break
+
+            seg_len = float(dist)
+            path_len += seg_len
+            hit_point = mathutils.Vector(hit)
+            normal = mathutils.Vector(normal)
             if normal.dot(dirn) > 0.0:
                 normal = -normal
 
-            path_len += float(dist)
             hit_obj = obj_map[index] if 0 <= index < len(obj_map) else None
-            absorb = float(getattr(hit_obj, 'absorption', 0.2)) if hit_obj else 0.2
-            scatter = float(getattr(hit_obj, 'scatter', 0.0)) if hit_obj else 0.0
-            energy *= refl_amp(absorb)
-
-            # Contribution to source from this bounce (specular and diffuse)
-            to_src = (source - hit)
-            dist_src = to_src.length
-            if dist_src > 0 and los_clear(hit + normal * eps, source, bvh, eps=eps):
-                to_src_dir = to_src.normalized()
-                req_dir = reflect(to_src_dir, normal)
-                cosang = max(-1.0, min(1.0, req_dir.dot(dirn)))
-                dtheta = acos(cosang)
-                weight_spec = (1.0 - scatter) * np.exp(-(dtheta / max(tol_rad, 1e-6))**2)
-                cos_i = max(0.0, (-dirn).dot(normal))
-                weight_diff = scatter * (cos_i / pi)
-
-                total_weight = weight_spec + weight_diff
-                if total_weight > 1e-6:
-                    total_dist = path_len + dist_src
-                    incoming_dir = -first_dir
-                    ambi = encode_ambisonics_3rd_order(_apply_orientation(incoming_dir, context))
-                    delay = (total_dist / c) * sr
-                    amp = (energy * sqrt(max(total_weight, 0.0))) / max(total_dist, 1e-6)
-                    add_impulse_air(ir, ambi, delay, amp, total_dist, context, sr)
-
-            # Continue with a scattered/specular mixture direction
-            spec_dir = reflect(dirn, normal)
-            if scatter <= 1e-6:
-                dirn = spec_dir
-            elif scatter >= 1.0 - 1e-6:
-                dirn = cosine_weighted_hemisphere(normal)
-            else:
-                rnd_dir = cosine_weighted_hemisphere(normal)
-                blended = (spec_dir * (1.0 - scatter) + rnd_dir * scatter)
-                dirn = blended.normalized()
-
-            pos = hit + normal * eps
-            if energy < 1e-6:
+            absorption = get_absorption_spectrum(hit_obj)
+            scatter_spec = get_scatter_spectrum(hit_obj)
+            transmission_coeff = get_transmission_coeff(hit_obj)
+            transmission_spec = np.clip(np.full(_NUM_BANDS, transmission_coeff, dtype=np.float32), 0.0, 1.0)
+            refl_spec = np.clip(1.0 - absorption - transmission_spec, 0.0, 1.0)
+            if not np.any(refl_spec > 1e-6) and transmission_coeff <= 1e-6:
                 break
 
-    # Do not normalize here; preserve direct-to-reverb ratio
+            spec_frac = np.clip(1.0 - scatter_spec, 0.0, 1.0)
+            diff_frac = np.clip(scatter_spec, 0.0, 1.0)
+            refl_amp_band = np.sqrt(refl_spec)
+            spec_amp_band = refl_amp_band * np.sqrt(np.maximum(spec_frac, 1e-6))
+            diff_amp_band = refl_amp_band * np.sqrt(np.maximum(diff_frac, 1e-6))
+            trans_amp_band = np.sqrt(transmission_spec)
+
+            to_src = source - hit_point
+            dist_src = to_src.length
+            if dist_src > 0.0:
+                has_los = los_clear(hit_point + normal * eps, source, bvh, eps=eps)
+                if has_los:
+                    to_src_dir = to_src.normalized()
+                    req_dir = reflect(to_src_dir, normal)
+                    cosang = max(-1.0, min(1.0, req_dir.dot(dirn)))
+                    dtheta = acos(cosang)
+                    spec_lobe = np.exp(-(dtheta / max(tol_rad, 1e-6)) ** 2)
+                    cos_i = max(0.0, (-dirn).dot(normal))
+                    diff_lobe = cos_i / pi
+                    total_weight_band = np.clip(spec_frac * spec_lobe + diff_frac * diff_lobe, 0.0, 1.0)
+                    if np.any(total_weight_band > 1e-6):
+                        band_amp = throughput * refl_amp_band * np.sqrt(total_weight_band)
+                        total_dist = path_len + dist_src
+                        amp_scalar = 1.0 / max(total_dist, recv_r)
+                        _emit_impulse(band_amp, total_dist, incoming_dir, amp_scalar)
+                else:
+                    _add_diffraction(hit_point, normal, dirn, to_src, throughput, refl_amp_band, diff_frac, path_len, incoming_dir)
+
+            base_throughput = throughput.copy()
+            trans_prob = min(0.999, max(0.0, transmission_coeff))
+            remaining = max(0.0, 1.0 - trans_prob)
+            diff_prob = remaining * float(np.clip(np.mean(diff_frac), 0.0, 1.0))
+            spec_prob = max(remaining - diff_prob, 0.0)
+
+            rnd = random.random()
+            next_dir = None
+            new_throughput = None
+            offset = normal * eps
+
+            if trans_prob > 1e-6 and rnd < trans_prob:
+                next_dir = dirn.normalized()
+                new_throughput = base_throughput * trans_amp_band
+                offset = -normal * eps
+            else:
+                rnd -= trans_prob
+                if diff_prob > 1e-6 and rnd < diff_prob:
+                    candidate = None
+                    cos_out = 0.0
+                    for _ in range(8):
+                        cand = cosine_weighted_hemisphere(normal)
+                        cos_out = max(0.0, cand.dot(normal))
+                        if cos_out > 1e-6:
+                            candidate = cand
+                            break
+                    if candidate is None:
+                        break
+                    next_dir = candidate.normalized()
+                    new_throughput = base_throughput * diff_amp_band
+                else:
+                    if spec_prob <= 1e-6 or np.all(spec_amp_band < 1e-6):
+                        break
+                    spec_dir = reflect(dirn, normal)
+                    spec_dir = _jitter_spec(spec_dir)
+                    next_dir = spec_dir.normalized()
+                    new_throughput = base_throughput * spec_amp_band
+
+            if new_throughput is None or next_dir is None:
+                break
+
+            new_throughput = np.nan_to_num(new_throughput, nan=0.0, posinf=0.0, neginf=0.0)
+            new_throughput = np.clip(new_throughput, 0.0, 1e6)
+            throughput = new_throughput.astype(np.float32)
+
+            if np.max(throughput) < 1e-6:
+                break
+
+            bounce += 1
+            pos = hit_point + offset + next_dir * (eps * 0.5)
+            dirn = next_dir
+
+            if rr_enable and bounce >= rr_start:
+                if random.random() > rr_survive:
+                    break
+                # Keep amplitude-domain IR stable by avoiding 1/p rescaling here.
+
     return ir
-
-
-
-# ----------------------------------------------------------------------------
-# Sampling on the sphere
-# ----------------------------------------------------------------------------
-
 def orthonormal_basis(n: mathutils.Vector):
     n = n.normalized()
     if abs(n.x) < 0.5:
@@ -860,6 +1212,34 @@ def fibonacci_sphere(samples):
         z = sin(theta) * radius
         points.append((x, y, z))
     return points
+
+
+def generate_ray_directions(samples):
+    if samples <= 0:
+        return []
+    base = fibonacci_sphere(samples)
+    axis = mathutils.Vector((np.random.normal(), np.random.normal(), np.random.normal()))
+    if axis.length == 0.0:
+        axis = mathutils.Vector((0.0, 0.0, 1.0))
+    axis.normalize()
+    angle = 2.0 * pi * np.random.random()
+    rot = mathutils.Matrix.Rotation(angle, 3, axis)
+    jitter_strength = 0.75 / float(max(samples, 1))
+    dirs = []
+    for p in base:
+        v = rot @ mathutils.Vector(p)
+        jitter = mathutils.Vector((
+            np.random.uniform(-jitter_strength, jitter_strength),
+            np.random.uniform(-jitter_strength, jitter_strength),
+            np.random.uniform(-jitter_strength, jitter_strength)
+        ))
+        candidate = v + jitter
+        if candidate.length == 0.0:
+            candidate = v
+        candidate = candidate.normalized()
+        dirs.append((float(candidate.x), float(candidate.y), float(candidate.z)))
+    random.shuffle(dirs)
+    return dirs
 
 # ----------------------------------------------------------------------------
 # Ambisonic Encoding (ACN / SN3D)
@@ -925,6 +1305,27 @@ def encode_ambisonics_3rd_order(direction):
             sh[idx] = ylm
             idx += 1
     return sh
+
+
+# ACN order mapping for 3rd order (16 channels)
+_ACN_ORDERS = (0, 1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3)
+
+
+def apply_near_field_compensation(ambi_vec: np.ndarray, distance_m: float, reference_m: float) -> np.ndarray:
+    """Apply a lightweight near-field compensation by boosting higher orders for close distances."""
+    if reference_m <= 0.0:
+        return ambi_vec
+    ref = max(reference_m, 1e-3)
+    dist = max(float(distance_m), 1e-3)
+    if dist >= ref:
+        return ambi_vec
+    scale = ref / dist
+    gains = np.ones_like(ambi_vec, dtype=np.float32)
+    for idx, order in enumerate(_ACN_ORDERS):
+        if order <= 0:
+            continue
+        gains[idx] = min(scale ** (0.5 * order), 8.0)
+    return ambi_vec * gains
 
 # ----------------------------------------------------------------------------
 # Registration
