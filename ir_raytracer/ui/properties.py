@@ -80,7 +80,7 @@ def register_acoustic_props():
     
     bpy.types.Object.absorption = bpy.props.FloatProperty(
         name="Absorption",
-        description="Wideband absorption coefficient (0 = reflective, 1 = fully absorbent)",
+        description="Average absorption coefficient: 0.0 = perfectly reflective, 1.0 = fully absorbent (anechoic)",
         default=0.2,
         min=0.0,
         max=1.0,
@@ -89,7 +89,7 @@ def register_acoustic_props():
     
     bpy.types.Object.absorption_bands = bpy.props.FloatVectorProperty(
         name="Absorption Spectrum",
-        description="Frequency-dependent absorption for octave bands (125 Hz - 8 kHz)",
+        description="Frequency-dependent absorption for octave bands (125 Hz to 8 kHz). Use for realistic material modeling",
         size=NUM_BANDS,
         min=0.0,
         max=1.0,
@@ -99,8 +99,8 @@ def register_acoustic_props():
     )
     
     bpy.types.Object.scatter = bpy.props.FloatProperty(
-        name="Scatter",
-        description="Surface scattering (0 = purely specular, 1 = fully diffuse/cosine)",
+        name="Scattering",
+        description="Diffuse vs specular reflection balance: 0.0 = mirror-like, 1.0 = completely diffuse",
         default=0.35,
         min=0.0,
         max=1.0,
@@ -120,7 +120,7 @@ def register_acoustic_props():
     
     bpy.types.Object.transmission = bpy.props.FloatProperty(
         name="Transmission",
-        description="Portion of incident energy transmitted through the surface (0 opaque, 1 fully transparent)",
+        description="Fraction of sound energy transmitted through surface. 0.0 = opaque wall, 1.0 = no barrier effect",
         default=0.0,
         min=0.0,
         max=1.0,
@@ -128,12 +128,21 @@ def register_acoustic_props():
     )
     
     bpy.types.Object.is_acoustic_source = bpy.props.BoolProperty(
-        name="Acoustic Source", 
+        name="Acoustic Source",
+        description="Mark this object as a sound source (speaker/instrument position)",
         default=False
     )
     
     bpy.types.Object.is_acoustic_receiver = bpy.props.BoolProperty(
-        name="Acoustic Receiver", 
+        name="Acoustic Receiver",
+        description="Mark this object as a microphone position for impulse response capture",
+        default=False
+    )
+    
+    # UI state property for frequency details
+    bpy.types.Object.show_frequency_details = bpy.props.BoolProperty(
+        name="Show Frequency Details",
+        description="Show detailed frequency response controls",
         default=False
     )
     
@@ -142,96 +151,107 @@ def register_acoustic_props():
     
     # Basic ray tracing parameters
     scene.airt_num_rays = bpy.props.IntProperty(
-        name="Rays", 
+        name="Rays per Pass",
+        description="Number of rays to trace per pass. More rays = better quality, slower render. 8192-16384 recommended for good quality",
         default=8192, 
         min=128, 
         max=131072
     )
     
     scene.airt_passes = bpy.props.IntProperty(
-        name="Averaging passes", 
+        name="Averaging Passes",
+        description="Multiple passes are averaged for smoother results. 4-8 passes recommended for final renders",
         default=4, 
         min=1, 
         max=32
     )
     
     scene.airt_max_order = bpy.props.IntProperty(
-        name="Max Bounces", 
+        name="Max Bounces",
+        description="Maximum ray bounces before termination. Higher values capture longer reverb tails (50-100 recommended)",
         default=64, 
         min=0, 
         max=1000
     )
     
     scene.airt_sr = bpy.props.IntProperty(
-        name="Sample Rate", 
+        name="Sample Rate (Hz)",
+        description="Audio sample rate for impulse response output. Higher rates preserve more high-frequency detail",
         default=48000, 
         min=8000, 
         max=192000
     )
     
     scene.airt_ir_seconds = bpy.props.FloatProperty(
-        name="IR Length (s)", 
+        name="Duration (seconds)",
+        description="Length of impulse response to generate. Should be long enough to capture full reverb decay", 
         default=2.0, 
         min=0.1, 
         max=20.0
     )
     
     scene.airt_angle_tol_deg = bpy.props.FloatProperty(
-        name="Specular tol (deg)", 
+        name="Specular Tolerance (°)",
+        description="Angular tolerance for specular reflection detection. Lower values = more precise specular behavior",
         default=8.0, 
         min=0.1, 
         max=30.0
     )
     
     scene.airt_wav_subtype = bpy.props.EnumProperty(
-        name="WAV Subtype",
-        description="Audio sample format for output WAV",
+        name="WAV Format",
+        description="Audio bit depth and format for output file. Float recommended for professional use",
         items=[
-            ('FLOAT', '32-bit Float', '32-bit IEEE float (recommended for IRs)'),
-            ('PCM_24', '24-bit PCM', '24-bit integer PCM'),
-            ('PCM_16', '16-bit PCM', '16-bit integer PCM')
+            ('FLOAT', '32-bit Float', '32-bit IEEE float (recommended for impulse responses)'),
+            ('PCM_24', '24-bit PCM', '24-bit integer PCM (good quality, smaller files)'),
+            ('PCM_16', '16-bit PCM', '16-bit integer PCM (smallest files, CD quality)')
         ],
         default='FLOAT'
     )
     
     scene.airt_seed = bpy.props.IntProperty(
-        name="Random Seed", 
+        name="Random Seed",
+        description="Seed for random number generation. Use same seed for reproducible results", 
         default=0, 
         min=0
     )
     
     scene.airt_recv_radius = bpy.props.FloatProperty(
-        name="Receiver radius (m)", 
+        name="Receiver Radius (m)",
+        description="Radius of spherical receiver for ray capture. Larger radius = more rays captured, but less precise",
         default=0.25, 
         min=0.001, 
         max=2.0
     )
     
     scene.airt_trace_mode = bpy.props.EnumProperty(
-        name="Tracing mode",
-        description="Reverse = early specular; Forward = stochastic tail & early",
+        name="Tracing Mode",
+        description="Ray tracing algorithm to use. Forward is recommended for most cases",
         items=[
-            ('FORWARD','Forward (source->room)','Stochastic forward tracing with receiver capture + path connection'),
-            ('REVERSE','Reverse (receiver->room)','Specular reverse tracing with LOS-to-source check')
+            ('FORWARD', 'Forward Tracing', 'Trace from source to room (recommended): captures both early reflections and diffuse reverb tail'),
+            ('REVERSE', 'Reverse Tracing', 'Trace from receiver backward: efficient for early specular reflections only')
         ],
         default='FORWARD'
     )
     
     # Russian roulette settings
     scene.airt_rr_enable = bpy.props.BoolProperty(
-        name="Russian roulette", 
+        name="Russian Roulette Termination",
+        description="Probabilistically terminate low-energy rays to improve performance. Disable for maximum accuracy",
         default=True
     )
     
     scene.airt_rr_start = bpy.props.IntProperty(
-        name="RR start bounce", 
+        name="Start Bounce",
+        description="Bounce number to start Russian Roulette termination. Higher values = more accurate reverb tail",
         default=20,  # Changed from 8 to 20 - allow more bounces before RR
         min=0, 
         max=1000
     )
     
     scene.airt_rr_p = bpy.props.FloatProperty(
-        name="RR survive prob", 
+        name="Survival Probability",
+        description="Probability ray survives Russian Roulette. Higher values = longer reverb tails, slower performance",
         default=0.95,  # Changed from 0.9 to 0.95 - higher survival rate
         min=0.05, 
         max=1.0
@@ -239,7 +259,8 @@ def register_acoustic_props():
     
     # Surface roughness
     scene.airt_spec_rough_deg = bpy.props.FloatProperty(
-        name="Specular roughness (deg)", 
+        name="Specular Roughness (°)",
+        description="Angular spread of specular reflections. 0 = perfect mirror, higher = more diffuse specular",
         default=5.0, 
         min=0.0, 
         max=30.0
@@ -349,7 +370,8 @@ def unregister_acoustic_props():
         "transmission",
         "is_acoustic_source",
         "is_acoustic_receiver",
-        "airt_material_preset"
+        "airt_material_preset",
+        "show_frequency_details"
     ]
     
     for attr in object_attrs:

@@ -6,13 +6,26 @@ import bpy
 import sys
 import random
 import numpy as np
+import importlib
 
-# Check for required dependencies
-try:
+def check_soundfile_availability():
+    """Check if soundfile is available and attempt to import it."""
+    try:
+        # Force reload of soundfile module to avoid cache issues
+        if 'soundfile' in sys.modules:
+            importlib.reload(sys.modules['soundfile'])
+        
+        import soundfile as sf
+        return True, sf
+    except ImportError as e:
+        return False, str(e)
+
+# Check for required dependencies with better error handling
+HAVE_SF, SF_ERROR = check_soundfile_availability()
+if HAVE_SF:
     import soundfile as sf
-    HAVE_SF = True
-except ImportError:
-    HAVE_SF = False
+else:
+    sf = None
 
 try:
     from ..core.ray_tracer import trace_impulse_response
@@ -21,13 +34,6 @@ except ImportError:
     # Fallback for development/testing
     trace_impulse_response = None
     build_bvh = get_scene_sources = get_scene_receivers = get_writable_path = None
-
-# Check for required dependencies
-try:
-    import soundfile as sf
-    HAVE_SF = True
-except ImportError:
-    HAVE_SF = False
 
 
 def calibrate_direct_1_over_r(ir: np.ndarray, context, source, receiver):
@@ -69,11 +75,16 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
 
     def execute(self, context):
         """Execute the render operation."""
-        # Check dependencies
-        if not HAVE_SF:
+        # Check dependencies with runtime re-check
+        sf_available, sf_error = check_soundfile_availability()
+        if not sf_available:
             cmd = f"{sys.executable} -m pip install soundfile"
-            self.report({'ERROR'}, "python-soundfile is required. Install with:\n" + cmd)
+            error_msg = f"python-soundfile is required but not available.\nError: {sf_error}\nInstall with: {cmd}"
+            self.report({'ERROR'}, error_msg)
             return {'CANCELLED'}
+        
+        # Import soundfile after confirming it's available
+        import soundfile as sf
         
         from ..core.ambisonic import HAVE_SCIPY
         if not HAVE_SCIPY:
@@ -340,5 +351,50 @@ class AIRT_OT_DiagnoseScene(bpy.types.Operator):
             if suggestions:
                 for suggestion in suggestions[:2]:
                     self.report({'INFO'}, f"Tip: {suggestion}")
+        
+        return {'FINISHED'}
+
+
+class AIRT_OT_CheckDependencies(bpy.types.Operator):
+    """Check and report addon dependencies status."""
+    bl_idname = "airt.check_dependencies"
+    bl_label = "Check Dependencies"
+    bl_description = "Check if required Python packages are installed"
+
+    def execute(self, context):
+        """Check dependencies and provide installation instructions."""
+        import sys
+        import subprocess
+        
+        # Check soundfile
+        sf_available, sf_error = check_soundfile_availability()
+        
+        if sf_available:
+            self.report({'INFO'}, "✓ soundfile is available")
+        else:
+            self.report({'ERROR'}, f"✗ soundfile not available: {sf_error}")
+            
+            # Provide installation commands
+            blender_python = sys.executable
+            pip_cmd = f'"{blender_python}" -m pip install soundfile'
+            
+            self.report({'INFO'}, f"Install command: {pip_cmd}")
+            self.report({'INFO'}, "Or restart Blender after installing soundfile")
+        
+        # Check scipy
+        try:
+            import scipy
+            self.report({'INFO'}, "✓ scipy is available")
+        except ImportError:
+            self.report({'WARNING'}, "✗ scipy not available (required for spherical harmonics)")
+            pip_cmd = f'"{sys.executable}" -m pip install scipy'
+            self.report({'INFO'}, f"Install command: {pip_cmd}")
+        
+        # Check numpy
+        try:
+            import numpy
+            self.report({'INFO'}, f"✓ numpy is available (version {numpy.__version__})")
+        except ImportError:
+            self.report({'ERROR'}, "✗ numpy not available (critical dependency)")
         
         return {'FINISHED'}

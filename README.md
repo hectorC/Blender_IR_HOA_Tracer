@@ -120,6 +120,33 @@ subprocess.check_call([pybin, "-m", "pip", "install", "soundfile", "scipy"])
 - When scripting renders from the command line (`blender -b`), pass `--python-expr "import bpy; bpy.ops.airt.render_ir()"` after setting up the scene in advance.
 - For scenes with scaled units, the add-on compensates via the scene's unit scale; verify the *Unit Scale* value in *Scene Properties > Units* if delays or attenuation feel incorrect.
 
+## Troubleshooting
+
+### "python-soundfile is required" Error
+If you get a soundfile import error when pressing "Generate IR", even after installation:
+
+1. **Use the "Check Dependencies" button** in the Diagnostics panel to verify installation status
+2. **Toggle the add-on off and on** in Blender's Add-ons preferences
+3. **Restart Blender completely** to clear Python module cache
+4. **Reinstall soundfile** using Blender's Python:
+   ```
+   C:\Program Files\Blender Foundation\Blender 4.5\4.5\python\bin\python.exe -m pip install soundfile
+   ```
+5. **Check Blender's console output** for detailed error messages
+
+### Add-on Update Issues
+When updating the add-on:
+1. **Disable the old version** first in Add-ons preferences
+2. **Remove the old files** from the addons folder if needed
+3. **Restart Blender** before installing the new version
+4. **Reinstall if needed** - sometimes a clean install works better than updating
+
+### Performance Issues
+- Use **Fast Preview Mode** for initial testing
+- Lower **ray count** and **passes** for faster renders
+- Reduce **max bounces** if reverb tail is too long
+- Use the **Diagnostics panel** to analyze performance impact
+
 Enjoy tracing ambisonic impulse responses directly inside Blender! [human][sarcasm](so kind of you ChatGPT, as always)[/sarcasm][/human]
 
 

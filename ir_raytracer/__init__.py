@@ -35,14 +35,17 @@ from .ui.properties import register_acoustic_props, unregister_acoustic_props
 from .ui.panels import (
     AIRT_PT_Panel, 
     AIRT_PT_MaterialPanel, 
-    AIRT_PT_AdvancedPanel
+    AIRT_PT_AudioPanel,
+    AIRT_PT_AdvancedPanel,
+    AIRT_PT_DiagnosticsPanel
 )
 from .ui.operators import (
     AIRT_OT_RenderIR,
     AIRT_OT_ValidateScene,
     AIRT_OT_ResetMaterial,
     AIRT_OT_CopyMaterial,
-    AIRT_OT_DiagnoseScene
+    AIRT_OT_DiagnoseScene,
+    AIRT_OT_CheckDependencies
 )
 
 
@@ -51,7 +54,9 @@ classes = [
     # Panels
     AIRT_PT_Panel,
     AIRT_PT_MaterialPanel,
+    AIRT_PT_AudioPanel,
     AIRT_PT_AdvancedPanel,
+    AIRT_PT_DiagnosticsPanel,
     
     # Operators
     AIRT_OT_RenderIR,
@@ -59,11 +64,21 @@ classes = [
     AIRT_OT_ResetMaterial,
     AIRT_OT_CopyMaterial,
     AIRT_OT_DiagnoseScene,
+    AIRT_OT_CheckDependencies,
 ]
 
 
 def register():
     """Register all addon classes and properties."""
+    # Check critical dependencies and warn user
+    try:
+        import soundfile as sf
+        print("Ambisonic IR Tracer: soundfile dependency found")
+    except ImportError:
+        print("WARNING: Ambisonic IR Tracer - soundfile not found!")
+        print("Install with: python -m pip install soundfile")
+        print("Or use Blender's Python: [Blender]/python/bin/python.exe -m pip install soundfile")
+    
     # Register properties first
     register_acoustic_props()
     
