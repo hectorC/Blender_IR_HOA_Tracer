@@ -1,0 +1,344 @@
+# -*- coding: utf-8 -*-
+"""
+Operators for the Ambisonic IR Tracer.
+"""
+import bpy
+import sys
+import random
+import numpy as np
+
+# Check for required dependencies
+try:
+    import soundfile as sf
+    HAVE_SF = True
+except ImportError:
+    HAVE_SF = False
+
+try:
+    from ..core.ray_tracer import trace_impulse_response
+    from ..utils.scene_utils import build_bvh, get_scene_sources, get_scene_receivers, get_writable_path
+except ImportError:
+    # Fallback for development/testing
+    trace_impulse_response = None
+    build_bvh = get_scene_sources = get_scene_receivers = get_writable_path = None
+
+# Check for required dependencies
+try:
+    import soundfile as sf
+    HAVE_SF = True
+except ImportError:
+    HAVE_SF = False
+
+
+def calibrate_direct_1_over_r(ir: np.ndarray, context, source, receiver):
+    """Scale the entire IR so that the direct-path amplitude in W matches 1/dist."""
+    try:
+        from ..utils.scene_utils import speed_of_sound_bu
+        
+        sr = int(context.scene.airt_sr)
+        c = speed_of_sound_bu(context)
+        dist = (receiver - source).length
+        
+        if dist <= 1e-9 or ir.shape[1] <= 22:
+            return ir, "Calibrate: skipped (zero distance or IR too short)"
+        
+        delay = (dist / c) * sr
+        n = int(round(delay))
+        n0 = max(0, n - 10)
+        n1 = min(ir.shape[1], n + 11)
+        
+        a_meas = float(np.max(np.abs(ir[0, n0:n1])))
+        if a_meas <= 1e-9:
+            return ir, f"Calibrate: skipped (no direct energy near n~{n})"
+        
+        a_exp = 1.0 / max(dist, 1e-9)
+        k = a_exp / a_meas
+        ir *= k
+        
+        return ir, f"Calibrate: dist={dist:.3f}m, expW={a_exp:.6f}, measW={a_meas:.6f}, k={k:.4f}, n~{n}, window=+/-10"
+    
+    except Exception as e:
+        return ir, f"Calibrate: skipped (err: {e})"
+
+
+class AIRT_OT_RenderIR(bpy.types.Operator):
+    """Render ambisonic impulse response operator."""
+    bl_idname = "airt.render_ir"
+    bl_label = "Render Ambisonic IR"
+    bl_description = "Render ambisonic impulse response using ray tracing"
+
+    def execute(self, context):
+        """Execute the render operation."""
+        # Check dependencies
+        if not HAVE_SF:
+            cmd = f"{sys.executable} -m pip install soundfile"
+            self.report({'ERROR'}, "python-soundfile is required. Install with:\n" + cmd)
+            return {'CANCELLED'}
+        
+        from ..core.ambisonic import HAVE_SCIPY
+        if not HAVE_SCIPY:
+            cmd = f"{sys.executable} -m pip install scipy"
+            self.report({'ERROR'}, "scipy is required for SH encoding. Install with:\n" + cmd)
+            return {'CANCELLED'}
+        
+        # Validate scene setup
+        scene = context.scene
+        sources = get_scene_sources(context)
+        receivers = get_scene_receivers(context)
+        
+        if not sources or not receivers:
+            self.report({'WARNING'}, "Need at least one source and one receiver object")
+            return {'CANCELLED'}
+        
+        # Use first source and receiver
+        source = sources[0]
+        receiver = receivers[0]
+        
+        # Build BVH for scene geometry
+        self.report({'INFO'}, "Building BVH tree...")
+        bvh, obj_map = build_bvh(context)
+        
+        if bvh is None:
+            self.report({'WARNING'}, "No geometry found for ray tracing")
+            return {'CANCELLED'}
+        
+        # Perform multiple passes with averaging
+        passes = max(1, int(scene.airt_passes))
+        ir = None
+        
+        self.report({'INFO'}, f"Starting {passes} render pass(es)...")
+        
+        for pass_idx in range(passes):
+            # Set random seed for reproducible results
+            if scene.airt_seed:
+                seed = int(scene.airt_seed) + pass_idx
+                random.seed(seed)
+                np.random.seed(seed)
+            
+            # Trace impulse response for this pass
+            self.report({'INFO'}, f"Tracing pass {pass_idx + 1}/{passes}...")
+            ir_pass = trace_impulse_response(context, source, receiver, bvh, obj_map)
+            
+            # Accumulate results
+            if ir is None:
+                ir = ir_pass.astype(np.float32)
+            else:
+                ir += ir_pass.astype(np.float32)
+        
+        # Average across passes
+        ir /= float(passes)
+        
+        # Optional direct path calibration
+        if bool(getattr(scene, 'airt_calibrate_direct', False)):
+            ir, cal_info = calibrate_direct_1_over_r(ir, context, source, receiver)
+            self.report({'INFO'}, cal_info)
+        
+        # Write output file
+        try:
+            sr = scene.airt_sr
+            subtype = scene.airt_wav_subtype
+            wav_path = get_writable_path("ir_output.wav")
+            
+            # Transpose for soundfile (expects channels x samples -> samples x channels)
+            sf.write(wav_path, ir.T.astype(np.float32), samplerate=sr, subtype=subtype)
+            
+            self.report({'INFO'}, f"IR saved to {wav_path} ({subtype}, {ir.shape[0]} channels, {ir.shape[1]} samples)")
+            
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to write WAV file: {e}")
+            return {'CANCELLED'}
+        
+        return {'FINISHED'}
+
+
+class AIRT_OT_ValidateScene(bpy.types.Operator):
+    """Validate scene setup for ray tracing."""
+    bl_idname = "airt.validate_scene"
+    bl_label = "Validate Scene"
+    bl_description = "Check scene setup for common issues"
+
+    def execute(self, context):
+        """Execute scene validation."""
+        issues = []
+        warnings = []
+        
+        # Check for sources and receivers
+        sources = get_scene_sources(context)
+        receivers = get_scene_receivers(context)
+        
+        if not sources:
+            issues.append("No acoustic source objects found")
+        elif len(sources) > 1:
+            warnings.append(f"Multiple sources found ({len(sources)}), using first one")
+        
+        if not receivers:
+            issues.append("No acoustic receiver objects found")
+        elif len(receivers) > 1:
+            warnings.append(f"Multiple receivers found ({len(receivers)}), using first one")
+        
+        # Check for geometry
+        bvh, obj_map = build_bvh(context)
+        if bvh is None:
+            issues.append("No geometry found for ray tracing")
+        else:
+            geo_count = len(obj_map)
+            if geo_count < 4:
+                warnings.append(f"Very few surfaces found ({geo_count}), consider adding more geometry")
+        
+        # Check render settings
+        scene = context.scene
+        if scene.airt_num_rays < 1000:
+            warnings.append("Low ray count may produce noisy results")
+        
+        if scene.airt_max_order > 100:
+            warnings.append("Very high bounce count may slow rendering significantly")
+        
+        # Report results
+        if issues:
+            self.report({'ERROR'}, "; ".join(issues))
+            return {'CANCELLED'}
+        elif warnings:
+            self.report({'WARNING'}, "; ".join(warnings))
+        else:
+            self.report({'INFO'}, "Scene validation passed")
+        
+        return {'FINISHED'}
+
+
+class AIRT_OT_ResetMaterial(bpy.types.Operator):
+    """Reset material properties to defaults."""
+    bl_idname = "airt.reset_material"
+    bl_label = "Reset Material"
+    bl_description = "Reset selected object's acoustic material to defaults"
+
+    def execute(self, context):
+        """Execute material reset."""
+        obj = context.object
+        if not obj:
+            self.report({'WARNING'}, "No object selected")
+            return {'CANCELLED'}
+        
+        # Reset to defaults
+        obj.absorption = 0.2
+        obj.scatter = 0.35
+        obj.transmission = 0.0
+        obj.airt_material_preset = 'CUSTOM'
+        
+        # Reset frequency bands
+        default_abs = [0.2] * 7
+        default_scat = [0.35] * 7
+        obj.absorption_bands = default_abs
+        obj.scatter_bands = default_scat
+        
+        self.report({'INFO'}, f"Reset material properties for {obj.name}")
+        return {'FINISHED'}
+
+
+class AIRT_OT_CopyMaterial(bpy.types.Operator):
+    """Copy material properties between objects."""
+    bl_idname = "airt.copy_material"
+    bl_label = "Copy Material"
+    bl_description = "Copy acoustic material from active to selected objects"
+
+    @classmethod
+    def poll(cls, context):
+        """Check if operator can run."""
+        return context.object is not None and len(context.selected_objects) > 1
+
+    def execute(self, context):
+        """Execute material copying."""
+        source_obj = context.object
+        target_objects = [obj for obj in context.selected_objects if obj != source_obj]
+        
+        if not target_objects:
+            self.report({'WARNING'}, "Need to select target objects")
+            return {'CANCELLED'}
+        
+        # Copy properties
+        for target_obj in target_objects:
+            target_obj.absorption = source_obj.absorption
+            target_obj.scatter = source_obj.scatter
+            target_obj.transmission = source_obj.transmission
+            target_obj.airt_material_preset = source_obj.airt_material_preset
+            target_obj.absorption_bands = source_obj.absorption_bands[:]
+            target_obj.scatter_bands = source_obj.scatter_bands[:]
+        
+        self.report({'INFO'}, f"Copied material from {source_obj.name} to {len(target_objects)} object(s)")
+        return {'FINISHED'}
+
+
+class AIRT_OT_DiagnoseScene(bpy.types.Operator):
+    """Diagnose potential reverb tail issues."""
+    bl_idname = "airt.diagnose_scene"
+    bl_label = "Diagnose Reverb Tail"
+    bl_description = "Analyze scene for issues that could cause short reverb tails"
+
+    def execute(self, context):
+        """Execute scene diagnosis."""
+        scene = context.scene
+        issues = []
+        suggestions = []
+        
+        # Check Russian Roulette settings
+        if scene.airt_rr_enable:
+            if scene.airt_rr_start < 15:
+                issues.append(f"Russian Roulette starts too early (bounce {scene.airt_rr_start})")
+                suggestions.append("Increase RR start bounce to 20+ for longer reverb")
+            
+            if scene.airt_rr_p < 0.93:
+                issues.append(f"Russian Roulette survival too low ({scene.airt_rr_p:.2f})")
+                suggestions.append("Increase survival probability to 0.95+ for longer tails")
+        
+        # Check throughput threshold
+        if hasattr(scene, 'airt_min_throughput'):
+            threshold = scene.airt_min_throughput
+            if threshold > 5e-6:
+                issues.append(f"Throughput threshold too high ({threshold:.1e})")
+                suggestions.append("Reduce min throughput to 1e-6 or lower")
+        
+        # Check material properties
+        try:
+            sources = get_scene_sources(context)
+            receivers = get_scene_receivers(context)
+            
+            if sources and receivers:
+                # Check if room is too absorptive
+                bvh, obj_map = build_bvh(context)
+                if obj_map:
+                    absorptions = []
+                    for obj in obj_map:
+                        if obj and hasattr(obj, 'absorption'):
+                            absorptions.append(obj.absorption)
+                    
+                    if absorptions:
+                        avg_absorption = sum(absorptions) / len(absorptions)
+                        if avg_absorption > 0.3:
+                            issues.append(f"Room very absorptive (avg {avg_absorption:.2f})")
+                            suggestions.append("Reduce wall absorption for longer reverb")
+                        elif avg_absorption < 0.05:
+                            suggestions.append(f"Room reflective (avg {avg_absorption:.2f}) - good for reverb")
+        
+        except Exception as e:
+            issues.append(f"Error analyzing geometry: {e}")
+        
+        # Check ray count
+        if scene.airt_num_rays < 4000:
+            suggestions.append(f"Low ray count ({scene.airt_num_rays}) may cause noise")
+        
+        # Check max bounces
+        if scene.airt_max_order < 50:
+            issues.append(f"Max bounces too low ({scene.airt_max_order})")
+            suggestions.append("Increase max bounces to 100+ for full reverb decay")
+        
+        # Report results
+        if issues:
+            self.report({'ERROR'}, f"Found {len(issues)} issue(s): " + "; ".join(issues[:3]))
+            for suggestion in suggestions[:3]:
+                self.report({'INFO'}, f"Suggestion: {suggestion}")
+        else:
+            self.report({'INFO'}, "No obvious issues found with reverb settings")
+            if suggestions:
+                for suggestion in suggestions[:2]:
+                    self.report({'INFO'}, f"Tip: {suggestion}")
+        
+        return {'FINISHED'}
