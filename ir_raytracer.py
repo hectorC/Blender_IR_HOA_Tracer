@@ -262,7 +262,8 @@ def unregister_acoustic_props():
         "airt_spec_rough_deg","airt_enable_seg_capture","airt_enable_diffraction",
         "airt_diffraction_samples","airt_diffraction_max_deg",
         "airt_yaw_offset_deg","airt_invert_z","airt_calibrate_direct",
-        "airt_air_enable","airt_air_temp_c","airt_air_humidity","airt_air_pressure_kpa","airt_quick_broadband"
+        "airt_air_enable","airt_air_temp_c","airt_air_humidity","airt_air_pressure_kpa",
+        "airt_quick_broadband","airt_omit_direct","airt_min_throughput"
     ):
         if hasattr(scene, k):
             delattr(scene, k)
@@ -726,8 +727,10 @@ def _trace_ir_forward(context, source, receiver, bvh, obj_map, directions):
     band_one = np.ones(_NUM_BANDS, dtype=np.float32)
     quick = bool(getattr(context.scene, 'airt_quick_broadband', False))
     num_dirs = max(1, len(directions))
+    ray_weight = 1.0 / float(num_dirs)
+    omit_direct = bool(getattr(context.scene, 'airt_omit_direct', False))
+    thr = float(getattr(context.scene, 'airt_min_throughput', 1e-4))
     pi4 = 4.0 * pi
-    quick = bool(getattr(context.scene, 'airt_quick_broadband', False))
     wrote_any = False
 
     def _path_band_profile(band_amp, distance_bu):
@@ -741,16 +744,20 @@ def _trace_ir_forward(context, source, receiver, bvh, obj_map, directions):
     def _emit_impulse(band_amp, distance_bu, incoming_dir, amp_scalar):
         if distance_bu <= 0.0:
             return False
+        band_profile = _path_band_profile(band_amp, distance_bu)
         if quick:
+            gain = float(np.mean(band_profile)) if isinstance(band_profile, np.ndarray) else float(band_profile)
+            gain = max(gain, 0.0)
+            if gain <= 0.0:
+                return False
             delay = (distance_bu / c) * sr
             ambi = _ambisonic(incoming_dir)
             ambi = apply_near_field_compensation(ambi, distance_bu * unit_scale, recv_r_m)
             if not np.any(np.abs(ambi) > 1e-8):
                 ambi = np.zeros(16, dtype=np.float32)
                 ambi[0] = 1.0
-            add_impulse_simple(ir, ambi, delay, amp_scalar)
+            add_impulse_simple(ir, ambi, delay, amp_scalar * gain)
             return True
-        band_profile = _path_band_profile(band_amp, distance_bu)
         if not np.any(band_profile > 1e-8):
             return False
         delay = (distance_bu / c) * sr
@@ -816,15 +823,6 @@ def _trace_ir_forward(context, source, receiver, bvh, obj_map, directions):
             _emit_impulse(band_amp, total_dist, incoming, amp_scalar)
             break
 
-    # Direct path (source -> receiver)
-    if los_clear(source, receiver, bvh):
-        dvec = receiver - source
-        dist_direct = dvec.length
-        if dist_direct > 0.0:
-            incoming = (source - receiver).normalized()
-            amp_scalar = 1.0 / max(dist_direct, recv_r)
-            _emit_impulse(band_one, dist_direct, incoming, amp_scalar)
-
     if bvh is None:
         return ir
 
@@ -840,7 +838,7 @@ def _trace_ir_forward(context, source, receiver, bvh, obj_map, directions):
         while bounce <= max_bounces:
             hit, normal, index, dist = bvh.ray_cast(pos + dirn * eps, dirn)
             if hit is None or index is None:
-                if seg_capture:
+                if seg_capture and not (omit_direct and bounce == 0):
                     far = pos + dirn * 100.0
                     got, t_hit, _ = segment_hits_sphere(pos, far, receiver, recv_r)
                     if got:
@@ -850,7 +848,7 @@ def _trace_ir_forward(context, source, receiver, bvh, obj_map, directions):
                         area = pi * recv_r * recv_r
                         view = area / max(pi4 * total_dist * total_dist, 1e-9)
                         amp_scalar = sqrt(max(view, 0.0)) / max(total_dist, recv_r)
-                        wrote_any = _emit_impulse(throughput, total_dist, incoming, amp_scalar) or wrote_any
+                        wrote_any = _emit_impulse(throughput * ray_weight, total_dist, incoming, amp_scalar) or wrote_any
                 break
 
             seg_len = float(dist)
@@ -876,7 +874,7 @@ def _trace_ir_forward(context, source, receiver, bvh, obj_map, directions):
             diff_amp_band = refl_amp_band * np.sqrt(np.maximum(diff_frac, 1e-6))
             trans_amp_band = np.sqrt(transmission_spec)
 
-            if seg_capture:
+            if seg_capture and not (omit_direct and bounce == 0):
                 got, t_hit, _ = segment_hits_sphere(pos, hit_point, receiver, recv_r)
                 if got:
                     partial_len = seg_len * t_hit
@@ -885,7 +883,7 @@ def _trace_ir_forward(context, source, receiver, bvh, obj_map, directions):
                     area = pi * recv_r * recv_r
                     view = area / max(pi4 * total_dist * total_dist, 1e-9)
                     amp_scalar = sqrt(max(view, 0.0)) / max(total_dist, recv_r)
-                    wrote_any = _emit_impulse(throughput, total_dist, incoming, amp_scalar) or wrote_any
+                    wrote_any = _emit_impulse(throughput * ray_weight, total_dist, incoming, amp_scalar) or wrote_any
 
             to_rcv = receiver - hit_point
             dist_rcv = to_rcv.length
@@ -905,9 +903,9 @@ def _trace_ir_forward(context, source, receiver, bvh, obj_map, directions):
                         total_dist = total_dist_hit + dist_rcv
                         amp_scalar = 1.0 / max(total_dist, recv_r)
                         incoming = (hit_point - receiver).normalized()
-                        wrote_any = _emit_impulse(band_amp, total_dist, incoming, amp_scalar) or wrote_any
+                        wrote_any = _emit_impulse(band_amp * ray_weight, total_dist, incoming, amp_scalar) or wrote_any
                 else:
-                    _add_diffraction(hit_point, normal, dirn, to_rcv, throughput, refl_amp_band, diff_frac, total_dist_hit)
+                    _add_diffraction(hit_point, normal, dirn, to_rcv, throughput * ray_weight, refl_amp_band, diff_frac, total_dist_hit)
 
             path_len = total_dist_hit
             base_throughput = throughput.copy()
@@ -921,13 +919,13 @@ def _trace_ir_forward(context, source, receiver, bvh, obj_map, directions):
             new_throughput = None
             offset = normal * eps
 
-            if trans_prob > 1e-6 and rnd < trans_prob:
+            if trans_prob > 0.0 and rnd < trans_prob:
                 next_dir = dirn.normalized()
                 new_throughput = base_throughput * trans_amp_band
                 offset = -normal * eps
             else:
                 rnd -= trans_prob
-                if diff_prob > 1e-6 and rnd < diff_prob:
+                if diff_prob > 0.0 and rnd < diff_prob:
                     candidate = None
                     cos_out = 0.0
                     for _ in range(8):
@@ -941,7 +939,7 @@ def _trace_ir_forward(context, source, receiver, bvh, obj_map, directions):
                     next_dir = candidate.normalized()
                     new_throughput = base_throughput * diff_amp_band
                 else:
-                    if spec_prob <= 1e-6 or np.all(spec_amp_band < 1e-6):
+                    if spec_prob <= 0.0 or np.all(spec_amp_band < 1e-6):
                         break
                     spec_dir = reflect(dirn, normal)
                     spec_dir = _jitter_spec(spec_dir)
@@ -955,7 +953,7 @@ def _trace_ir_forward(context, source, receiver, bvh, obj_map, directions):
             new_throughput = np.clip(new_throughput, 0.0, 1e6)
             throughput = new_throughput.astype(np.float32)
 
-            if np.max(throughput) < 1e-6:
+            if float(np.max(throughput)) < thr:
                 break
 
             bounce += 1
@@ -967,8 +965,19 @@ def _trace_ir_forward(context, source, receiver, bvh, obj_map, directions):
                     break
                 # Keep amplitude-domain IR stable by avoiding 1/p rescaling here.
 
+    if not omit_direct and los_clear(source, receiver, bvh):
+        dvec = receiver - source
+        dist_direct = dvec.length
+        if dist_direct > 0.0:
+            incoming = (source - receiver).normalized()
+            area = pi * recv_r * recv_r
+            view = area / max(pi4 * dist_direct * dist_direct, 1e-9)
+            amp_scalar = sqrt(max(view, 0.0)) / max(dist_direct, recv_r)
+            wrote_any = _emit_impulse(band_one * ray_weight, dist_direct, incoming, amp_scalar) or wrote_any
+
     if not wrote_any:
-        print(f"[AIRT] forward trace produced no contributions (dirs={len(directions)}, bvh={'None' if bvh is None else 'BVH'})")
+        suffix = " (omit_direct active)" if omit_direct else ""
+        print(f"[AIRT] forward trace produced no contributions (dirs={len(directions)}, bvh={'None' if bvh is None else 'BVH'}){suffix}")
     return ir
 def _trace_ir_reverse(context, source, receiver, bvh, obj_map, directions):
     num_channels = 16
@@ -995,6 +1004,10 @@ def _trace_ir_reverse(context, source, receiver, bvh, obj_map, directions):
 
     band_one = np.ones(_NUM_BANDS, dtype=np.float32)
     quick = bool(getattr(context.scene, 'airt_quick_broadband', False))
+    num_dirs = max(1, len(directions))
+    omit_direct = bool(getattr(context.scene, 'airt_omit_direct', False))
+    thr = float(getattr(context.scene, 'airt_min_throughput', 1e-4))
+    pi4 = 4.0 * pi
 
     def _path_band_profile(band_amp, distance_bu):
         air = _air_attenuation_bands(distance_bu * unit_scale, context)
@@ -1007,16 +1020,20 @@ def _trace_ir_reverse(context, source, receiver, bvh, obj_map, directions):
     def _emit_impulse(band_amp, distance_bu, incoming_dir, amp_scalar):
         if distance_bu <= 0.0:
             return
+        band_profile = _path_band_profile(band_amp, distance_bu)
         if quick:
+            gain = float(np.mean(band_profile)) if isinstance(band_profile, np.ndarray) else float(band_profile)
+            gain = max(gain, 0.0)
+            if gain <= 0.0:
+                return
             delay = (distance_bu / c) * sr
             ambi = _ambisonic(incoming_dir)
             ambi = apply_near_field_compensation(ambi, distance_bu * unit_scale, recv_r_m)
             if not np.any(np.abs(ambi) > 1e-8):
                 ambi = np.zeros(16, dtype=np.float32)
                 ambi[0] = 1.0
-            add_impulse_simple(ir, ambi, delay, amp_scalar)
+            add_impulse_simple(ir, ambi, delay, amp_scalar * gain)
             return
-        band_profile = _path_band_profile(band_amp, distance_bu)
         if not np.any(band_profile > 1e-8):
             return
         delay = (distance_bu / c) * sr
@@ -1080,15 +1097,6 @@ def _trace_ir_reverse(context, source, receiver, bvh, obj_map, directions):
             _emit_impulse(band_amp, total_dist, incoming_dir, amp_scalar)
             break
 
-    # Direct path (source -> receiver)
-    if los_clear(source, receiver, bvh):
-        dvec = receiver - source
-        dist_direct = dvec.length
-        if dist_direct > 0.0:
-            incoming = (source - receiver).normalized()
-            amp_scalar = 1.0 / max(dist_direct, recv_r)
-            _emit_impulse(band_one, dist_direct, incoming, amp_scalar)
-
     if bvh is None:
         return ir
 
@@ -1151,7 +1159,7 @@ def _trace_ir_reverse(context, source, receiver, bvh, obj_map, directions):
                         amp_scalar = 1.0 / max(total_dist, recv_r)
                         _emit_impulse(band_amp, total_dist, incoming_dir, amp_scalar)
                 else:
-                    _add_diffraction(hit_point, normal, dirn, to_src, throughput, refl_amp_band, diff_frac, path_len, incoming_dir)
+                    _add_diffraction(hit_point, normal, dirn, to_src, throughput * ray_weight, refl_amp_band, diff_frac, path_len, incoming_dir)
 
             base_throughput = throughput.copy()
             trans_prob = min(0.999, max(0.0, transmission_coeff))
@@ -1164,13 +1172,13 @@ def _trace_ir_reverse(context, source, receiver, bvh, obj_map, directions):
             new_throughput = None
             offset = normal * eps
 
-            if trans_prob > 1e-6 and rnd < trans_prob:
+            if trans_prob > 0.0 and rnd < trans_prob:
                 next_dir = dirn.normalized()
                 new_throughput = base_throughput * trans_amp_band
                 offset = -normal * eps
             else:
                 rnd -= trans_prob
-                if diff_prob > 1e-6 and rnd < diff_prob:
+                if diff_prob > 0.0 and rnd < diff_prob:
                     candidate = None
                     cos_out = 0.0
                     for _ in range(8):
@@ -1184,7 +1192,7 @@ def _trace_ir_reverse(context, source, receiver, bvh, obj_map, directions):
                     next_dir = candidate.normalized()
                     new_throughput = base_throughput * diff_amp_band
                 else:
-                    if spec_prob <= 1e-6 or np.all(spec_amp_band < 1e-6):
+                    if spec_prob <= 0.0 or np.all(spec_amp_band < 1e-6):
                         break
                     spec_dir = reflect(dirn, normal)
                     spec_dir = _jitter_spec(spec_dir)
@@ -1198,7 +1206,7 @@ def _trace_ir_reverse(context, source, receiver, bvh, obj_map, directions):
             new_throughput = np.clip(new_throughput, 0.0, 1e6)
             throughput = new_throughput.astype(np.float32)
 
-            if np.max(throughput) < 1e-6:
+            if float(np.max(throughput)) < thr:
                 break
 
             bounce += 1
@@ -1209,6 +1217,19 @@ def _trace_ir_reverse(context, source, receiver, bvh, obj_map, directions):
                 if random.random() > rr_survive:
                     break
                 # Keep amplitude-domain IR stable by avoiding 1/p rescaling here.
+
+    if num_dirs > 0:
+        ir /= float(num_dirs)
+
+    if not omit_direct and los_clear(source, receiver, bvh):
+        dvec = receiver - source
+        dist_direct = dvec.length
+        if dist_direct > 0.0:
+            incoming = (source - receiver).normalized()
+            area = pi * recv_r * recv_r
+            view = area / max(pi4 * dist_direct * dist_direct, 1e-9)
+            amp_scalar = sqrt(max(view, 0.0)) / max(dist_direct, recv_r)
+            _emit_impulse(band_one, dist_direct, incoming, amp_scalar)
 
     return ir
 def orthonormal_basis(n: mathutils.Vector):
