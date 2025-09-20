@@ -970,9 +970,8 @@ def _trace_ir_forward(context, source, receiver, bvh, obj_map, directions):
         dist_direct = dvec.length
         if dist_direct > 0.0:
             incoming = (source - receiver).normalized()
-            area = pi * recv_r * recv_r
-            view = area / max(pi4 * dist_direct * dist_direct, 1e-9)
-            amp_scalar = sqrt(max(view, 0.0)) / max(dist_direct, recv_r)
+            # Use the same 1/r geometric falloff as bounced arrivals
+            amp_scalar = 1.0 / max(dist_direct, recv_r)
             wrote_any = _emit_impulse(band_one * ray_weight, dist_direct, incoming, amp_scalar) or wrote_any
 
     if not wrote_any:
@@ -1226,9 +1225,8 @@ def _trace_ir_reverse(context, source, receiver, bvh, obj_map, directions):
         dist_direct = dvec.length
         if dist_direct > 0.0:
             incoming = (source - receiver).normalized()
-            area = pi * recv_r * recv_r
-            view = area / max(pi4 * dist_direct * dist_direct, 1e-9)
-            amp_scalar = sqrt(max(view, 0.0)) / max(dist_direct, recv_r)
+            # Use the same 1/r geometric falloff as bounced arrivals
+            amp_scalar = 1.0 / max(dist_direct, recv_r)
             _emit_impulse(band_one, dist_direct, incoming, amp_scalar)
 
     return ir
