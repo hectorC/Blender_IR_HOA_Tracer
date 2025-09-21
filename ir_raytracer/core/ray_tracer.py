@@ -85,6 +85,54 @@ class ImpulseResponseRenderer:
         self.ir = np.zeros((16, config.ir_length_samples), dtype=np.float32)
         self.wrote_any = False
     
+    def _cast_ray(self, pos: mathutils.Vector, direction: mathutils.Vector, bvh):
+        """Cast a ray and return hit information."""
+        hit, normal, index, dist = bvh.ray_cast(pos + direction * self.config.eps, direction)
+        
+        if hit is None or index is None:
+            return False, None, None, None
+            
+        hit_point = mathutils.Vector(hit)
+        normal = mathutils.Vector(normal)
+        if normal.dot(direction) > 0.0:
+            normal = -normal
+            
+        return True, hit_point, normal, index
+    
+    def _get_material_properties(self, face_index: int, obj_map: List[Any]):
+        """Get material properties for a face."""
+        from ..core.acoustics import MaterialProperties
+        
+        hit_obj = obj_map[face_index] if 0 <= face_index < len(obj_map) else None
+        return MaterialProperties(hit_obj)
+    
+    def _calculate_air_absorption(self, distance: float) -> np.ndarray:
+        """Calculate air absorption for a given distance."""
+        from ..core.acoustics import air_attenuation_bands, NUM_BANDS
+        
+        return air_attenuation_bands(
+            distance * self.config.unit_scale,  # Convert to meters
+            self.config.air_temp_c,
+            self.config.air_humidity,
+            self.config.air_pressure_kpa
+        )
+    
+    def _should_terminate_ray(self, bounce: int, throughput: np.ndarray) -> bool:
+        """Check if ray should be terminated using Russian Roulette."""
+        if not self.config.rr_enable:
+            return False
+            
+        if bounce < self.config.rr_start_bounce:
+            return False
+            
+        # Russian roulette
+        import random
+        if random.random() > self.config.rr_survive_prob:
+            return True
+            
+        # Continue with boosted throughput
+        return False
+    
     def add_impulse_simple(self, ambi_vec: np.ndarray, delay_samples: float, amplitude: float):
         """Add a simple impulse to the IR."""
         n = int(np.floor(delay_samples))
@@ -177,6 +225,29 @@ class ImpulseResponseRenderer:
             wrote = True
         
         return wrote
+    
+    def _apply_russian_roulette(self, bounce: int, throughput: np.ndarray):
+        """Apply Russian Roulette with proper energy compensation.
+        
+        Returns:
+            (should_terminate, compensated_throughput)
+        """
+        import random
+        
+        # Throughput check
+        if float(np.max(throughput)) < self.config.min_throughput:
+            return True, throughput
+        
+        # Russian roulette with energy compensation
+        if self.config.rr_enable and bounce >= self.config.rr_start_bounce:
+            if random.random() > self.config.rr_survive_prob:
+                return True, throughput  # Terminate
+            else:
+                # Boost throughput to compensate for survival probability
+                compensated_throughput = throughput / self.config.rr_survive_prob
+                return False, compensated_throughput
+        
+        return False, throughput
 
 
 class ForwardRayTracer(ImpulseResponseRenderer):
@@ -265,8 +336,9 @@ class ForwardRayTracer(ImpulseResponseRenderer):
             dirn = new_direction
             bounce += 1
             
-            # Russian roulette termination
-            if self._should_terminate_ray(bounce, throughput):
+            # Russian roulette termination with energy compensation
+            should_terminate, throughput = self._apply_russian_roulette(bounce, throughput)
+            if should_terminate:
                 break
     
     def _check_segment_capture(self, pos: mathutils.Vector, direction: mathutils.Vector,
@@ -455,11 +527,178 @@ class ReverseRayTracer(ImpulseResponseRenderer):
     def _trace_single_ray(self, direction: mathutils.Vector, start_pos: mathutils.Vector,
                          target: mathutils.Vector, bvh, obj_map: List[Any],
                          initial_throughput: np.ndarray, incoming_direction: mathutils.Vector):
-        """Trace a single reverse ray."""
-        # Implementation similar to forward tracer but with reversed logic
-        # This is a simplified structure - full implementation would follow
-        # the pattern established in the forward tracer
-        pass
+        """Trace a single reverse ray from receiver toward room, checking for source connections."""
+        import random
+        
+        pos = start_pos
+        dirn = direction
+        throughput = initial_throughput.copy()
+        path_length = 0.0
+        bounce = 0
+        
+        while bounce < self.config.max_bounces:
+            # Cast ray to find next surface hit
+            hit, hit_point, normal, face_index = self._cast_ray(pos, dirn, bvh)
+            
+            if not hit:
+                # Ray escaped to infinity - no more bounces
+                break
+                
+            # Calculate path length to hit point
+            seg_length = (hit_point - pos).length
+            path_length += seg_length
+            
+            # Get material properties
+            material = self._get_material_properties(face_index, obj_map)
+            
+            # Apply air absorption
+            if self.config.air_enable:
+                throughput *= self._calculate_air_absorption(seg_length)
+            
+            # Check for direct connection to source after this bounce
+            if bounce > 0 or not self.config.omit_direct:  # Skip direct connection only on first bounce if omit_direct
+                self._check_source_connection(hit_point, normal, target, throughput, 
+                                            material, path_length, bvh, incoming_direction, bounce)
+            
+            # Apply surface absorption
+            throughput *= material.reflection_amplitude  # Use reflection amplitude, not (1 - absorption)
+            
+            # Check if energy is too low to continue
+            if np.max(throughput) < self.config.min_throughput:
+                break
+                
+            # Russian roulette termination with energy compensation
+            should_terminate, throughput = self._apply_russian_roulette(bounce, throughput)
+            if should_terminate:
+                break
+            
+            # Sample new direction based on material BRDF
+            new_direction = self._sample_brdf_direction(normal, -dirn, material, 
+                                                      random.random(), random.random())
+            if new_direction is None:
+                break
+                
+            # Update for next iteration
+            pos = hit_point + normal * self.config.eps + new_direction * (self.config.eps * 0.5)
+            dirn = new_direction
+            incoming_direction = (-new_direction).normalized()
+            bounce += 1
+    
+    def _check_source_connection(self, hit_point: mathutils.Vector, normal: mathutils.Vector,
+                               source: mathutils.Vector, throughput: np.ndarray, 
+                               material: MaterialProperties, path_length: float,
+                               bvh, incoming_direction: mathutils.Vector, bounce: int):
+        """Check for direct line-of-sight connection from hit point to source."""
+        from ..utils.scene_utils import los_clear
+        from ..core.acoustics import NUM_BANDS
+        
+        # Vector from hit point to source
+        to_source = source - hit_point
+        distance_to_source = to_source.length
+        
+        if distance_to_source <= self.config.eps:
+            return  # Too close
+            
+        source_direction = to_source / distance_to_source
+        
+        # Check if source is above the surface (avoid self-intersection)
+        if source_direction.dot(normal) <= 0.0:
+            return  # Source is behind surface
+            
+        # Check line-of-sight to source
+        if not los_clear(hit_point + normal * self.config.eps, source, bvh):
+            return  # Blocked by geometry
+            
+        # Calculate total path length including connection to source
+        total_distance = path_length + distance_to_source
+        
+        # Apply air absorption for the final segment to source
+        final_throughput = throughput.copy()
+        if self.config.air_enable:
+            final_throughput *= self._calculate_air_absorption(distance_to_source)
+            
+        # Calculate BRDF contribution for reflection toward source
+        # Use the incoming direction (from previous ray segment) and outgoing direction (toward source)
+        brdf_weight = self._evaluate_brdf(normal, incoming_direction, source_direction, material)
+        
+        # CRITICAL FIX: Weight by cosine and 1/pi for proper Monte Carlo integration
+        # In reverse ray tracing, each source connection must be weighted by the sampling PDF
+        import math
+        cos_out = abs(source_direction.dot(normal))
+        monte_carlo_weight = cos_out / math.pi  # Cosine-weighted hemisphere sampling PDF
+        
+        final_throughput *= brdf_weight * monte_carlo_weight
+        
+        # Additional normalization based on bounce count to prevent accumulation
+        # Later bounces should contribute less (geometric decay)
+        bounce_weight = 1.0 / (1.0 + bounce * 0.5)  # Decay with bounce count
+        final_throughput *= bounce_weight
+        
+        # Scale by distance to further reduce over-contribution from distant connections
+        distance_weight = 1.0 / max(1.0, distance_to_source * 0.1)
+        final_throughput *= distance_weight
+        
+        # Emit impulse response contribution
+        if self.emit_impulse(final_throughput, total_distance, source_direction, 1.0):
+            self.wrote_any = True
+    
+    def _evaluate_brdf(self, normal: mathutils.Vector, incoming: mathutils.Vector, 
+                      outgoing: mathutils.Vector, material: MaterialProperties) -> float:
+        """Evaluate BRDF for reflection from incoming to outgoing direction."""
+        # Simplified Lambert + specular BRDF model
+        cos_in = abs(incoming.dot(normal))
+        cos_out = abs(outgoing.dot(normal))
+        
+        if cos_in <= 0.0 or cos_out <= 0.0:
+            return 0.0
+            
+        # Lambertian diffuse component
+        diffuse = cos_out / pi
+        
+        # Simple specular component (Phong-like)
+        reflect_dir = incoming - 2.0 * incoming.dot(normal) * normal
+        specular_factor = max(0.0, reflect_dir.dot(outgoing))
+        # Use average scatter as roughness indicator
+        avg_scatter = float(np.mean(material.scatter_spectrum))
+        specular = pow(specular_factor, max(1.0, 1.0 / max(avg_scatter, 0.01)))
+        
+        # Combine diffuse and specular (simplified mixing)
+        return diffuse * avg_scatter + specular * (1.0 - avg_scatter) * 0.1
+    
+    def _sample_brdf_direction(self, normal: mathutils.Vector, incoming: mathutils.Vector,
+                              material: MaterialProperties, r1: float, r2: float) -> Optional[mathutils.Vector]:
+        """Sample a new direction based on BRDF."""
+        import math
+        
+        # Simple cosine-weighted hemisphere sampling for diffuse
+        # Convert to local coordinate system where normal is (0,0,1)
+        
+        # Create orthonormal basis
+        if abs(normal.z) < 0.999:
+            tangent = mathutils.Vector((normal.y, -normal.x, 0.0)).normalized()
+        else:
+            tangent = mathutils.Vector((1.0, 0.0, 0.0))
+        bitangent = normal.cross(tangent)
+        
+        # Cosine-weighted hemisphere sampling
+        cos_theta = math.sqrt(r1)
+        sin_theta = math.sqrt(1.0 - r1)
+        phi = 2.0 * math.pi * r2
+        
+        # Local direction
+        local_dir = mathutils.Vector((
+            sin_theta * math.cos(phi),
+            sin_theta * math.sin(phi), 
+            cos_theta
+        ))
+        
+        # Transform to world coordinates
+        world_dir = (local_dir.x * tangent + 
+                    local_dir.y * bitangent + 
+                    local_dir.z * normal)
+        
+        return world_dir.normalized()
+    
     
     def _add_direct_path(self, source: mathutils.Vector, receiver: mathutils.Vector,
                         bvh, throughput: np.ndarray):
@@ -506,10 +745,9 @@ def trace_impulse_response(context, source: mathutils.Vector, receiver: mathutil
     
     # Determine optimal strategy based on requirements
     if config.omit_direct:
-        # Reverb-only: Use forward tracing with enhanced segment capture for efficiency
-        # Note: Reverse tracer is not fully implemented, so we use Forward with better settings
-        trace_mode = 'FORWARD'
-        print(f"Reverb-only mode: using Forward tracing with enhanced segment capture")
+        # Reverb-only: Use reverse tracing exclusively for efficiency
+        trace_mode = 'REVERSE'
+        print(f"Reverb-only mode: using Reverse tracing for optimal diffuse capture")
         tracer = create_ray_tracer(trace_mode, config)
         return tracer.trace_rays(source, receiver, bvh, obj_map, directions)
         
