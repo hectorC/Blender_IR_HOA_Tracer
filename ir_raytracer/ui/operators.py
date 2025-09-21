@@ -117,8 +117,13 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
         passes = max(1, int(scene.airt_passes))
         ir = None
         
+        # Debug: Check if omit_direct is being read correctly
+        omit_direct_setting = getattr(scene, 'airt_omit_direct', False)
+        self.report({'INFO'}, f"Skip Direct Path setting: {omit_direct_setting}")
+        
         self.report({'INFO'}, f"Starting {passes} render pass(es)...")
         
+        # Accumulate results with better energy handling
         for pass_idx in range(passes):
             # Set random seed for reproducible results
             if scene.airt_seed:
@@ -130,19 +135,26 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
             self.report({'INFO'}, f"Tracing pass {pass_idx + 1}/{passes}...")
             ir_pass = trace_impulse_response(context, source, receiver, bvh, obj_map)
             
-            # Accumulate results
+            
+            # Accumulate results with float64 precision to avoid rounding errors
             if ir is None:
-                ir = ir_pass.astype(np.float32)
+                ir = ir_pass.astype(np.float64)  # Use higher precision during accumulation
             else:
-                ir += ir_pass.astype(np.float32)
+                ir += ir_pass.astype(np.float64)
         
-        # Average across passes
-        ir /= float(passes)
+        # Average across passes and convert back to float32
+        ir = (ir / float(passes)).astype(np.float32)
         
-        # Optional direct path calibration
-        if bool(getattr(scene, 'airt_calibrate_direct', False)):
+        # Optional direct path calibration - BUT NOT if direct path is omitted!
+        omit_direct = bool(getattr(scene, 'airt_omit_direct', False))
+        should_calibrate = bool(getattr(scene, 'airt_calibrate_direct', False))
+        
+        if should_calibrate and not omit_direct:
             ir, cal_info = calibrate_direct_1_over_r(ir, context, source, receiver)
             self.report({'INFO'}, cal_info)
+        elif should_calibrate and omit_direct:
+            self.report({'INFO'}, "Calibration skipped: Skip Direct Path is enabled")
+        
         
         # Write output file
         try:

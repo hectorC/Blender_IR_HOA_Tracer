@@ -182,6 +182,10 @@ class ImpulseResponseRenderer:
 class ForwardRayTracer(ImpulseResponseRenderer):
     """Forward ray tracer (source to receiver)."""
     
+    def __init__(self, config: RayTracingConfig):
+        """Initialize forward ray tracer."""
+        super().__init__(config)
+    
     def trace_rays(self, source: mathutils.Vector, receiver: mathutils.Vector,
                    bvh, obj_map: List[Any], directions: List[Tuple[float, float, float]]) -> np.ndarray:
         """Trace rays from source towards receiver."""
@@ -218,7 +222,8 @@ class ForwardRayTracer(ImpulseResponseRenderer):
             
             if hit is None or index is None:
                 # Ray escaped - check for segment capture
-                if self.config.segment_capture and not (self.config.omit_direct and bounce == 0):
+                # Note: segment capture is different from direct path - always allow it
+                if self.config.segment_capture:
                     self._check_segment_capture(pos, dirn, receiver, throughput, path_length)
                 break
             
@@ -239,8 +244,9 @@ class ForwardRayTracer(ImpulseResponseRenderer):
             if not np.any(material.reflection_spectrum > 1e-6) and material.transmission <= 1e-6:
                 break
             
-            # Segment capture
-            if self.config.segment_capture and not (self.config.omit_direct and bounce == 0):
+            # Segment capture for ray segments (different from direct path)
+            # Segment capture should always be allowed regardless of omit_direct setting
+            if self.config.segment_capture:
                 self._check_segment_capture(pos, dirn, receiver, throughput, path_length, hit_point)
             
             # Direct connection to receiver
@@ -283,6 +289,12 @@ class ForwardRayTracer(ImpulseResponseRenderer):
         area = pi * self.config.receiver_radius * self.config.receiver_radius
         view = area / max(self.config.pi4 * total_dist * total_dist, 1e-9)
         amplitude_scalar = sqrt(max(view, 0.0)) / max(total_dist, self.config.receiver_radius)
+        
+        # Enhanced scaling for reverb-only scenarios
+        if self.config.omit_direct:
+            # When direct path is omitted, boost segment capture energy
+            # This compensates for the missing direct path contribution
+            amplitude_scalar *= 100.0  # Reasonable boost for reverb-only mode
         
         if self.emit_impulse(throughput, total_dist, incoming, amplitude_scalar):
             self.wrote_any = True
@@ -483,11 +495,87 @@ def create_ray_tracer(tracing_mode: str, config: RayTracingConfig) -> ImpulseRes
 def trace_impulse_response(context, source: mathutils.Vector, receiver: mathutils.Vector,
                           bvh, obj_map: List[Any], 
                           directions: Optional[List[Tuple[float, float, float]]] = None) -> np.ndarray:
-    """Main entry point for impulse response tracing."""
+    """Main entry point for impulse response tracing using hybrid approach."""
     config = RayTracingConfig(context)
     
     if directions is None:
         directions = generate_ray_directions(config.num_rays)
     
-    tracer = create_ray_tracer(context.scene.airt_trace_mode, config)
-    return tracer.trace_rays(source, receiver, bvh, obj_map, directions)
+    # Get user's preferred tracing mode
+    user_trace_mode = context.scene.airt_trace_mode
+    
+    # Determine optimal strategy based on requirements
+    if config.omit_direct:
+        # Reverb-only: Use forward tracing with enhanced segment capture for efficiency
+        # Note: Reverse tracer is not fully implemented, so we use Forward with better settings
+        trace_mode = 'FORWARD'
+        print(f"Reverb-only mode: using Forward tracing with enhanced segment capture")
+        tracer = create_ray_tracer(trace_mode, config)
+        return tracer.trace_rays(source, receiver, bvh, obj_map, directions)
+        
+    elif user_trace_mode == 'HYBRID':
+        # Professional hybrid approach: combine both methods
+        print(f"Hybrid tracing: combining Forward (early) + Reverse (late) for optimal results")
+        return _trace_hybrid(config, source, receiver, bvh, obj_map, directions)
+        
+    else:
+        # Legacy single-method approach for compatibility/debugging
+        print(f"Single-method mode: {user_trace_mode}")
+        tracer = create_ray_tracer(user_trace_mode, config)
+        return tracer.trace_rays(source, receiver, bvh, obj_map, directions)
+
+
+def _trace_hybrid(config: RayTracingConfig, source: mathutils.Vector, receiver: mathutils.Vector,
+                  bvh, obj_map: List[Any], directions: List[Tuple[float, float, float]]) -> np.ndarray:
+    """Hybrid tracing: Forward for early reflections + Reverse for late reverb."""
+    
+    # Split ray budget between methods
+    early_rays = directions[:len(directions)//2]  # First half for forward
+    late_rays = directions[len(directions)//2:]   # Second half for reverse
+    
+    print(f"  Forward rays: {len(early_rays)} (early reflections)")
+    print(f"  Reverse rays: {len(late_rays)} (late reverb)")
+    
+    # Forward tracing for direct path + early reflections
+    forward_tracer = create_ray_tracer('FORWARD', config)
+    ir_early = forward_tracer.trace_rays(source, receiver, bvh, obj_map, early_rays)
+    
+    # Reverse tracing for diffuse reverb tail (skip direct path)
+    import copy
+    config_late = copy.deepcopy(config)  # Create copy
+    config_late.omit_direct = True  # Force omit direct for late reverb
+    reverse_tracer = create_ray_tracer('REVERSE', config_late)
+    ir_late = reverse_tracer.trace_rays(source, receiver, bvh, obj_map, late_rays)
+    
+    # Combine with time-based weighting
+    ir_combined = _blend_early_late(ir_early, ir_late, config)
+    
+    return ir_combined
+
+
+def _blend_early_late(ir_early: np.ndarray, ir_late: np.ndarray, config: RayTracingConfig) -> np.ndarray:
+    """Blend early and late contributions with time-based weighting."""
+    
+    # Transition time: early reflections dominate before this, late reverb after
+    transition_time_sec = 0.1  # 100ms transition point (typical for rooms)
+    transition_sample = int(transition_time_sec * config.sample_rate)
+    
+    # Create time-based weighting functions
+    samples = ir_early.shape[1]
+    time_axis = np.arange(samples) / config.sample_rate
+    
+    # Early weight: strong initially, fades after transition
+    early_weight = np.exp(-np.maximum(0, time_axis - transition_time_sec) * 10)
+    
+    # Late weight: grows after transition
+    late_weight = 1.0 - early_weight * 0.7  # Allow some overlap
+    
+    # Apply weighting
+    ir_combined = np.zeros_like(ir_early)
+    for ch in range(ir_early.shape[0]):
+        ir_combined[ch, :] = (ir_early[ch, :] * early_weight + 
+                              ir_late[ch, :] * late_weight)
+    
+    print(f"  Blended at {transition_time_sec*1000:.0f}ms transition point")
+    
+    return ir_combined

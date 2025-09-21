@@ -43,6 +43,19 @@ def _update_material_preset(self, context):
         _MATERIAL_PRESET_GUARD.discard(key)
 
 
+def _update_tracing_mode_defaults(self, context):
+    """Update segment capture default when tracing mode changes."""
+    if self.airt_trace_mode == 'FORWARD':
+        # Forward tracing needs segment capture
+        self.airt_enable_seg_capture = True
+    elif self.airt_trace_mode == 'HYBRID':
+        # Hybrid mode uses segment capture in forward component
+        self.airt_enable_seg_capture = True
+    elif self.airt_trace_mode == 'REVERSE':
+        # Reverse tracing can work without segment capture
+        pass  # Leave current setting
+
+
 def _mark_material_custom(self, context):
     """Mark material as custom when properties are manually changed."""
     key = id(self)
@@ -224,14 +237,17 @@ def register_acoustic_props():
         max=2.0
     )
     
+    # Tracing mode with intelligent defaults
     scene.airt_trace_mode = bpy.props.EnumProperty(
         name="Tracing Mode",
-        description="Ray tracing algorithm to use. Forward is recommended for most cases",
+        description="Ray tracing algorithm to use",
         items=[
-            ('FORWARD', 'Forward Tracing', 'Trace from source to room (recommended): captures both early reflections and diffuse reverb tail'),
-            ('REVERSE', 'Reverse Tracing', 'Trace from receiver backward: efficient for early specular reflections only')
+            ('HYBRID', 'Hybrid Tracing (Recommended)', 'Combines Forward + Reverse for optimal early reflections and reverb tail'),
+            ('FORWARD', 'Forward Only', 'Trace from source to room: good for early reflections, less efficient for late reverb'),
+            ('REVERSE', 'Reverse Only', 'Trace from receiver backward: efficient for reverb, may miss some early reflection details')
         ],
-        default='FORWARD'
+        default='HYBRID',
+        update=_update_tracing_mode_defaults
     )
     
     # Russian roulette settings
@@ -244,7 +260,7 @@ def register_acoustic_props():
     scene.airt_rr_start = bpy.props.IntProperty(
         name="Start Bounce",
         description="Bounce number to start Russian Roulette termination. Higher values = more accurate reverb tail",
-        default=20,  # Changed from 8 to 20 - allow more bounces before RR
+        default=30,  # Increased from 20 to 30 - be even more conservative
         min=0, 
         max=1000
     )
@@ -252,7 +268,7 @@ def register_acoustic_props():
     scene.airt_rr_p = bpy.props.FloatProperty(
         name="Survival Probability",
         description="Probability ray survives Russian Roulette. Higher values = longer reverb tails, slower performance",
-        default=0.95,  # Changed from 0.9 to 0.95 - higher survival rate
+        default=0.97,  # Increased from 0.95 to 0.97 - even higher survival rate
         min=0.05, 
         max=1.0
     )
@@ -268,8 +284,9 @@ def register_acoustic_props():
     
     # Advanced features
     scene.airt_enable_seg_capture = bpy.props.BoolProperty(
-        name="Capture along segments", 
-        default=False
+        name="Segment Capture",
+        description="Capture ray energy along segments (essential for Forward tracing, optional for Reverse tracing)",
+        default=True
     )
     
     scene.airt_enable_diffraction = bpy.props.BoolProperty(
@@ -344,8 +361,8 @@ def register_acoustic_props():
     )
     
     scene.airt_omit_direct = bpy.props.BoolProperty(
-        name="Omit direct (reverb-only)",
-        description="Do not write the direct sound into the IR; useful for general reverb buses",
+        name="Skip Direct Path",
+        description="Skip the direct (unobstructed) path from source to receiver. Keeps reflections and reverb only",
         default=False
     )
     

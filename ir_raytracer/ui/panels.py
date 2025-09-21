@@ -290,7 +290,13 @@ class AIRT_PT_AdvancedPanel(bpy.types.Panel):
         col = box.column(align=True)
         col.prop(scene, "airt_spec_rough_deg", text="Specular Roughness (°)")
         col.prop(scene, "airt_angle_tol_deg", text="Angle Tolerance (°)")
-        col.prop(scene, "airt_enable_seg_capture", text="Enable Segment Capture")
+        col.prop(scene, "airt_enable_seg_capture", text="Segment Capture")
+        
+        # Warning for Forward mode without segment capture
+        if scene.airt_trace_mode == 'FORWARD' and not scene.airt_enable_seg_capture:
+            warning_box = col.box()
+            warning_box.alert = True
+            warning_box.label(text="⚠ Forward tracing needs Segment Capture!", icon='ERROR')
         
         # Diffraction modeling
         box.prop(scene, "airt_enable_diffraction", text="Edge Diffraction")
