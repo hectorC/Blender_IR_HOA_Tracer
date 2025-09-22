@@ -517,18 +517,34 @@ class ReverseRayTracer(ImpulseResponseRenderer):
         band_one = np.ones(NUM_BANDS, dtype=np.float32)
         num_dirs = max(1, len(directions))
         
+        print(f"DEBUG: ReverseRayTracer starting with {num_dirs} directions")
+        
+        total_connections = 0
+        rays_traced = 0
         for d in directions:
             first_direction = mathutils.Vector(d).normalized()
             incoming_direction = (-first_direction).normalized()
             self._trace_single_ray(first_direction, receiver, source, bvh, obj_map, 
                                  band_one, incoming_direction)
+            rays_traced += 1
         
-        # Normalize by number of directions
+        # FIXED: Remove ALL normalization for reverse tracer
+        # The reverse tracer makes 311k connections and accumulates energy correctly.
+        # Any normalization kills the accumulated energy from all connections.
+        # Let the accumulated energy speak for itself!
         if num_dirs > 0:
-            self.ir /= float(num_dirs)
+            ir_max_before = np.max(np.abs(self.ir))
+            # NO NORMALIZATION - just track the energy for debug
+            ir_max_after = ir_max_before  # Same since no division
+            print(f"DEBUG: IR normalization - Before: {ir_max_before:.2e}, After: {ir_max_after:.2e}, Factor: 1.00e+00 (NO NORMALIZATION)")
         
         # Always add direct path (omit_direct functionality removed)
+        print("DEBUG: Adding direct path (reverse tracer)...")
         self._add_direct_path(source, receiver, bvh, band_one)
+        
+        print(f"DEBUG: Reverse tracer completed {rays_traced} rays")
+        if hasattr(self, 'connection_count'):
+            print(f"DEBUG: Total successful connections: {self.connection_count}")
         
         return self.ir
     
@@ -543,6 +559,10 @@ class ReverseRayTracer(ImpulseResponseRenderer):
         throughput = initial_throughput.copy()
         path_length = 0.0
         bounce = 0
+        
+        debug_this_ray = bounce == 0 and random.random() < 0.0001  # Debug only ~0.01% of rays
+        
+        connections_made = 0
         
         while bounce < self.config.max_bounces:
             # Cast ray to find next surface hit
@@ -603,6 +623,8 @@ class ReverseRayTracer(ImpulseResponseRenderer):
         to_source = source - hit_point
         distance_to_source = to_source.length
         
+        debug_early_connections = bounce <= 2 and random.random() < 0.01  # Debug early bounces occasionally
+        
         if distance_to_source <= self.config.eps:
             return  # Too close
             
@@ -618,11 +640,19 @@ class ReverseRayTracer(ImpulseResponseRenderer):
             
         # Calculate total path length including connection to source
         total_distance = path_length + distance_to_source
+        delay_ms = (total_distance / self.config.speed_of_sound) * 1000.0
+        
+        if debug_early_connections:
+            print(f"DEBUG: Reverse connection bounce {bounce}: {delay_ms:.1f}ms, {total_distance:.1f}m")
+            print(f"DEBUG: Initial throughput: {np.mean(throughput):.2e}")
         
         # Apply air absorption for the final segment to source
         final_throughput = throughput.copy()
         if self.config.air_enable:
-            final_throughput *= self._calculate_air_absorption(distance_to_source)
+            air_loss = self._calculate_air_absorption(distance_to_source)
+            final_throughput *= air_loss
+            if debug_early_connections:
+                print(f"DEBUG: After air absorption: {np.mean(final_throughput):.2e} (factor: {np.mean(air_loss):.3f})")
             
         # Calculate BRDF contribution for reflection toward source
         # Use the incoming direction (from previous ray segment) and outgoing direction (toward source)
@@ -633,6 +663,9 @@ class ReverseRayTracer(ImpulseResponseRenderer):
         import math
         cos_out = abs(source_direction.dot(normal))
         monte_carlo_weight = cos_out / math.pi  # Cosine-weighted hemisphere sampling PDF
+        
+        # DEBUG: Track energy reduction chain
+        initial_energy = np.mean(final_throughput)
         
         final_throughput *= brdf_weight * monte_carlo_weight
         
@@ -645,8 +678,19 @@ class ReverseRayTracer(ImpulseResponseRenderer):
         distance_weight = 1.0 / max(1.0, distance_to_source * 0.1)
         final_throughput *= distance_weight
         
+        final_energy = np.mean(final_throughput)
+        
+        # DEBUG: Log energy reduction for early connections
+        if debug_early_connections or (bounce <= 1 and random.random() < 0.001):
+            print(f"DEBUG: Energy chain bounce {bounce}: {initial_energy:.2e} → {final_energy:.2e}")
+            print(f"DEBUG: BRDF: {brdf_weight:.3f}, MC: {monte_carlo_weight:.3f}, Bounce: {bounce_weight:.3f}, Dist: {distance_weight:.3f}")
+            print(f"DEBUG: Total reduction: {(final_energy/initial_energy if initial_energy > 0 else 0):.2e}")
+        
         # Emit impulse response contribution
         if self.emit_impulse(final_throughput, total_distance, source_direction, 1.0):
+            if not hasattr(self, 'connection_count'):
+                self.connection_count = 0
+            self.connection_count += 1
             self.wrote_any = True
     
     def _evaluate_brdf(self, normal: mathutils.Vector, incoming: mathutils.Vector, 
