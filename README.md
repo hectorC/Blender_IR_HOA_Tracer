@@ -59,16 +59,29 @@ The hybrid approach intelligently blends two complementary ray tracing strategie
 - Limitation: May miss some early reflection detail
 
 ## Installation
-1. **Download the add-on**
-   - Clone or download this repository, or create a ZIP archive containing `ir_raytracer.py`.
-2. **Install in Blender**
-   - Launch Blender and open *Edit ? Preferences ? Add-ons*.
-   - Click *Install*, browse to the ZIP (or `ir_raytracer.py`), and confirm.
-   - Enable the checkbox next to **Ambisonic IR Tracer**.
-   - Blender will store the add-on under `scripts/addons` in your user configuration.
-3. **Install Python dependencies** (only needs to be done once per Blender installation)
-   - Open Blender's *Scripting* workspace.
-   - Copy-paste the snippet below into the Python console or a text block and run it:
+
+### Download from GitHub
+1. **Download the repository**
+   - Go to the GitHub repository: `https://github.com/hectorC/Blender_IR_HOA_Tracer`
+   - Click **Code** → **Download ZIP** to get the complete repository
+   - Extract the ZIP file to a temporary location
+
+2. **Locate the add-on folder**
+   - Navigate to the extracted folder: `Blender_IR_HOA_Tracer-main/source/`
+   - You'll find the `ir_raytracer` folder - this is the complete add-on package
+
+### Install in Blender  
+3. **Install the add-on folder**
+   - Launch Blender and open **Edit** → **Preferences** → **Add-ons**
+   - Click **Install...** and browse to the `ir_raytracer` folder
+   - Select the entire `ir_raytracer` folder (not individual files) and click **Install Add-on**
+   - Enable the checkbox next to **"Ambisonic IR Tracer"**
+   - Blender will copy the add-on to `scripts/addons/ir_raytracer/` in your user configuration
+
+### Install Python Dependencies
+4. **Install required packages** (only needed once per Blender installation)
+   - Open Blender's **Scripting** workspace
+   - Copy-paste this code into the Python console and run it:
 
 ```python
 import bpy, subprocess, sys
@@ -77,14 +90,25 @@ subprocess.check_call([pybin, "-m", "pip", "install", "--upgrade", "pip"])
 subprocess.check_call([pybin, "-m", "pip", "install", "soundfile", "scipy"])
 ```
 
-   - Alternatively, from a shell you can run Blender's bundled Python directly (adjust the path to match your platform):
+   **Alternative method** - Run from command line (adjust path for your Blender version):
 
 ```bash
-"/path/to/Blender/4.5/python/bin/python3.10" -m pip install --upgrade pip
-"/path/to/Blender/4.5/python/bin/python3.10" -m pip install soundfile scipy
+# Windows example
+"C:\Program Files\Blender Foundation\Blender 4.5\4.5\python\bin\python.exe" -m pip install soundfile scipy
+
+# macOS example  
+"/Applications/Blender.app/Contents/Resources/4.5/python/bin/python3.10" -m pip install soundfile scipy
+
+# Linux example
+"/opt/blender/4.5/python/bin/python3.10" -m pip install soundfile scipy
 ```
 
-   - Restart Blender after installing the packages so the add-on can import them.
+5. **Restart Blender** after installing dependencies so the add-on can import the required packages
+
+### Verify Installation
+- Open the **3D Viewport** → **Sidebar** (press `N`) → **IR Tracer** tab
+- You should see the complete ray tracing interface with material presets and tracing mode options
+- Use **Check Dependencies** in the Diagnostics panel to verify soundfile and scipy are properly installed
 
 ## Usage
 
