@@ -1,4 +1,4 @@
-[human] Code generated with AI asistance (ChatGPT web, Codex and Claude). Use at your own risk. It seems to produce usable results for artistic purposes. I've created this project mainly to learn about the current state of AI and the advantages and limitations of AI coding by attempting to create a tool I've been wanting to have. Take the information below with a large pinch of salt! It is AI generated and after some iterations might not be accurate anymore. The comments in the commits are mine.[/human]
+[human] Code generated with AI asistance (ChatGPT web, Codex and Claude). Use at your own risk. It seems to produce usable results for artistic purposes but it is not fully tested. I've created this project mainly to understand the current capabilities of AI assisted coding while attempting to create a Blender tool that for a long time I've been wanting to have. Take the information below with a large pinch of salt! It is all AI generated and it might not be accurate. The comments in the commits are all mine.[/human]
 
 # Ambisonic IR Tracer for Blender - Professional 3D Acoustic Ray Tracer
 
