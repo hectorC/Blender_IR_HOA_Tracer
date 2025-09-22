@@ -250,6 +250,37 @@ def register_acoustic_props():
         update=_update_tracing_mode_defaults
     )
     
+    # HYBRID BALANCE CONTROLS - Advanced user settings for fine-tuning hybrid blend
+    scene.airt_hybrid_forward_gain_db = bpy.props.FloatProperty(
+        name="Forward Tracer Gain (dB)",
+        description="Boost/cut discrete echoes and early reflections. +dB = stronger echoes, -dB = softer echoes",
+        default=0.0,
+        min=-24.0,
+        max=24.0,
+        step=10,  # 0.1 dB steps
+        precision=1
+    )
+    
+    scene.airt_hybrid_reverse_gain_db = bpy.props.FloatProperty(
+        name="Reverse Tracer Gain (dB)", 
+        description="Boost/cut diffuse reverb tail. +dB = lusher reverb, -dB = drier sound",
+        default=0.0,
+        min=-24.0,
+        max=24.0,
+        step=10,  # 0.1 dB steps
+        precision=1
+    )
+    
+    scene.airt_hybrid_reverb_ramp_time = bpy.props.FloatProperty(
+        name="Late Reverb Ramp (s)",
+        description="How quickly diffuse reverb builds up. Shorter = earlier reverb onset, Longer = more discrete early period",
+        default=0.2,
+        min=0.05,
+        max=0.5,
+        step=5,   # 0.005s steps
+        precision=3
+    )
+    
     # Russian roulette settings
     scene.airt_rr_enable = bpy.props.BoolProperty(
         name="Russian Roulette Termination",
@@ -393,7 +424,8 @@ def unregister_acoustic_props():
     scene_attrs = [
         "airt_num_rays", "airt_passes", "airt_max_order", "airt_sr", "airt_ir_seconds",
         "airt_angle_tol_deg", "airt_wav_subtype", "airt_seed", "airt_recv_radius",
-        "airt_trace_mode", "airt_rr_enable", "airt_rr_start", "airt_rr_p",
+        "airt_trace_mode", "airt_hybrid_forward_gain_db", "airt_hybrid_reverse_gain_db", "airt_hybrid_reverb_ramp_time",
+        "airt_rr_enable", "airt_rr_start", "airt_rr_p",
         "airt_spec_rough_deg", "airt_enable_seg_capture", "airt_enable_diffraction",
         "airt_diffraction_samples", "airt_diffraction_max_deg",
         "airt_yaw_offset_deg", "airt_invert_z", "airt_calibrate_direct",

@@ -45,7 +45,8 @@ from .ui.operators import (
     AIRT_OT_ResetMaterial,
     AIRT_OT_CopyMaterial,
     AIRT_OT_DiagnoseScene,
-    AIRT_OT_CheckDependencies
+    AIRT_OT_CheckDependencies,
+    AIRT_OT_HybridPreset
 )
 
 
@@ -65,6 +66,7 @@ classes = [
     AIRT_OT_CopyMaterial,
     AIRT_OT_DiagnoseScene,
     AIRT_OT_CheckDependencies,
+    AIRT_OT_HybridPreset,
 ]
 
 

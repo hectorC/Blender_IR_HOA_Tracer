@@ -403,3 +403,39 @@ class AIRT_OT_CheckDependencies(bpy.types.Operator):
             self.report({'ERROR'}, "✗ numpy not available (critical dependency)")
         
         return {'FINISHED'}
+
+
+class AIRT_OT_HybridPreset(bpy.types.Operator):
+    """Apply hybrid balance presets for common acoustic scenarios."""
+    bl_idname = "airt.hybrid_preset"
+    bl_label = "Apply Hybrid Preset"
+    bl_description = "Apply preset hybrid balance settings for specific acoustic scenarios"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    # Properties for the preset values
+    forward_gain: bpy.props.FloatProperty(name="Forward Gain (dB)", default=0.0, min=-24.0, max=24.0)
+    reverse_gain: bpy.props.FloatProperty(name="Reverse Gain (dB)", default=0.0, min=-24.0, max=24.0)
+    ramp_time: bpy.props.FloatProperty(name="Ramp Time (s)", default=0.2)
+    
+    def execute(self, context):
+        """Apply the preset values to the scene."""
+        scene = context.scene
+        
+        # Apply the preset values
+        scene.airt_hybrid_forward_gain_db = self.forward_gain
+        scene.airt_hybrid_reverse_gain_db = self.reverse_gain  
+        scene.airt_hybrid_reverb_ramp_time = self.ramp_time
+        
+        # Report what was applied
+        if self.forward_gain == 0.0 and self.reverse_gain == 0.0 and self.ramp_time == 0.2:
+            preset_name = "Reset to defaults"
+        elif self.forward_gain > 0 and self.reverse_gain < 0:
+            preset_name = "Tunnel/Corridor (enhanced echoes)"
+        elif self.forward_gain < 0 and self.reverse_gain > 0:
+            preset_name = "Cathedral (lush reverb)"
+        else:
+            preset_name = "Custom settings"
+            
+        self.report({'INFO'}, f"Applied hybrid preset: {preset_name}")
+        
+        return {'FINISHED'}

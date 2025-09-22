@@ -73,6 +73,23 @@ class RayTracingConfig:
         # Derived constants
         self.eps = 1e-4
         self.pi4 = 4.0 * pi
+        
+        # HYBRID BLEND CONTROLS - Advanced user balance settings
+        # Forward Tracer Gain: -24dB to +24dB (discrete echoes, tunnel reflections)
+        self.hybrid_forward_gain_db = float(getattr(scene, 'airt_hybrid_forward_gain_db', 0.0))
+        self.hybrid_forward_gain_db = max(-24.0, min(24.0, self.hybrid_forward_gain_db))
+        
+        # Reverse Tracer Gain: -24dB to +24dB (diffuse reverb tail)
+        self.hybrid_reverse_gain_db = float(getattr(scene, 'airt_hybrid_reverse_gain_db', 0.0))
+        self.hybrid_reverse_gain_db = max(-24.0, min(24.0, self.hybrid_reverse_gain_db))
+        
+        # Late Reverb Ramp: 0.05s to 0.5s (how quickly reverse reverb builds up)
+        self.hybrid_reverb_ramp_time = float(getattr(scene, 'airt_hybrid_reverb_ramp_time', 0.2))
+        self.hybrid_reverb_ramp_time = max(0.05, min(0.5, self.hybrid_reverb_ramp_time))
+        
+        # Convert dB to linear gain factors
+        self.hybrid_forward_gain_linear = 10.0 ** (self.hybrid_forward_gain_db / 20.0)
+        self.hybrid_reverse_gain_linear = 10.0 ** (self.hybrid_reverse_gain_db / 20.0)
 
 
 class ImpulseResponseRenderer:
@@ -874,14 +891,14 @@ def _blend_early_late(ir_early: np.ndarray, ir_late: np.ndarray, config: RayTrac
         ir_late_scaled = ir_late * 0.5  # Default conservative scaling
         print(f"  DEBUG: Using default Reverse scaling: 0.5")
     
-    # ADDITIVE WEIGHTING: Forward always 100%, Reverse ramps up over time
-    reverse_ramp_start = 0.05   # 50ms - start adding reverse
-    reverse_ramp_end = 0.2      # 200ms - full reverse addition
+    # ADDITIVE WEIGHTING: Forward always 100%, Reverse ramps up over USER-CONTROLLED time
+    reverse_ramp_start = 0.05   # 50ms - start adding reverse (fixed)
+    reverse_ramp_end = config.hybrid_reverb_ramp_time  # USER CONTROL: 0.05s - 0.5s
     
     # Forward weight: Always 1.0 (preserve all discrete echoes)
     forward_weight = np.ones_like(time_axis)
     
-    # Reverse weight: Smooth ramp from 0 to 1
+    # Reverse weight: Smooth ramp from 0 to 1 over USER-DEFINED time
     reverse_weight = np.zeros_like(time_axis)
     
     # Before ramp: no reverse
@@ -896,12 +913,16 @@ def _blend_early_late(ir_early: np.ndarray, ir_late: np.ndarray, config: RayTrac
     mask_ramp = (time_axis >= reverse_ramp_start) & (time_axis <= reverse_ramp_end)
     if np.any(mask_ramp):
         ramp_width = reverse_ramp_end - reverse_ramp_start
-        linear_progress = (time_axis[mask_ramp] - reverse_ramp_start) / ramp_width
-        # Smooth S-curve for natural ramp-up
-        cosine_progress = 0.5 * (1.0 - np.cos(np.pi * linear_progress))
-        reverse_weight[mask_ramp] = cosine_progress
+        if ramp_width > 0:  # Prevent division by zero
+            linear_progress = (time_axis[mask_ramp] - reverse_ramp_start) / ramp_width
+            # Smooth S-curve for natural ramp-up
+            cosine_progress = 0.5 * (1.0 - np.cos(np.pi * linear_progress))
+            reverse_weight[mask_ramp] = cosine_progress
+        else:
+            # Instant transition if ramp_time = 0.05s
+            reverse_weight[mask_ramp] = 1.0
     
-    # ADDITIVE COMBINATION: Forward + (Reverse * weight)
+    # ADDITIVE COMBINATION with USER GAIN CONTROLS
     ir_combined = np.zeros_like(ir_early)
     
     # Debug: Check individual tracer energies before combination
@@ -909,11 +930,16 @@ def _blend_early_late(ir_early: np.ndarray, ir_late: np.ndarray, config: RayTrac
     late_max = np.max(np.abs(ir_late_scaled))
     print(f"  DEBUG: Forward max energy: {early_max:.6f}")
     print(f"  DEBUG: Reverse max energy (scaled): {late_max:.6f}")
+    print(f"  DEBUG: User gains - Forward: {config.hybrid_forward_gain_db:.1f}dB ({config.hybrid_forward_gain_linear:.3f}x)")
+    print(f"  DEBUG: User gains - Reverse: {config.hybrid_reverse_gain_db:.1f}dB ({config.hybrid_reverse_gain_linear:.3f}x)")
+    print(f"  DEBUG: Reverb ramp time: {config.hybrid_reverb_ramp_time:.3f}s")
     
     for ch in range(ir_early.shape[0]):
-        # ADDITIVE BLEND: Keep all Forward + add weighted Reverse
-        ir_combined[ch, :] = (ir_early[ch, :] * forward_weight + 
-                              ir_late_scaled[ch, :] * reverse_weight)
+        # ADDITIVE BLEND with USER GAIN CONTROLS:
+        # Forward: Always preserved + user gain control
+        # Reverse: Time-weighted addition + user gain control
+        ir_combined[ch, :] = (ir_early[ch, :] * forward_weight * config.hybrid_forward_gain_linear + 
+                              ir_late_scaled[ch, :] * reverse_weight * config.hybrid_reverse_gain_linear)
     
     combined_max_before = np.max(np.abs(ir_combined))
     print(f"  DEBUG: Combined max energy before norm: {combined_max_before:.6f}")
@@ -939,7 +965,9 @@ def _blend_early_late(ir_early: np.ndarray, ir_late: np.ndarray, config: RayTrac
     
     print(f"  DEBUG: Energy distribution - Early: {early_energy:.6f}, Mid: {mid_energy:.6f}, Late: {late_energy:.6f}")
     
-    print(f"  ADDITIVE blend: Forward 100% + Reverse ramp {reverse_ramp_start*1000:.0f}-{reverse_ramp_end*1000:.0f}ms")
-    print(f"  ✨ Preserves discrete echoes while adding diffuse reverb!")
+    print(f"  🎛️  USER-CONTROLLED ADDITIVE blend:")
+    print(f"    Forward gain: {config.hybrid_forward_gain_db:+.1f}dB | Reverse gain: {config.hybrid_reverse_gain_db:+.1f}dB")
+    print(f"    Reverb ramp: {reverse_ramp_start*1000:.0f}-{reverse_ramp_end*1000:.0f}ms")
+    print(f"    ✨ Preserves discrete echoes while adding diffuse reverb!")
     
     return ir_combined

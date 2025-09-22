@@ -56,7 +56,7 @@ class AIRT_PT_Panel(bpy.types.Panel):
         
         box.separator()
         
-        # Essential parameters in logical grid layout
+        # Essential parameters in logical grid layout (ALWAYS VISIBLE)
         col = box.column(align=True)
         
         # Performance vs Quality trade-off
@@ -76,6 +76,44 @@ class AIRT_PT_Panel(bpy.types.Panel):
         row.scale_y = 1.1
         icon = 'PLAY' if scene.airt_quick_broadband else 'RENDER_ANIMATION'
         row.prop(scene, "airt_quick_broadband", text="Fast Preview Mode", toggle=True, icon=icon)
+        
+        # HYBRID BALANCE CONTROLS - Show only when Hybrid mode is selected
+        if scene.airt_trace_mode == 'HYBRID':
+            hybrid_box = box.box()
+            hybrid_box.label(text="🎛️ Hybrid Balance Controls", icon='PREFERENCES')
+            
+            # Advanced controls in a clean layout
+            col = hybrid_box.column(align=True)
+            
+            # Forward/Reverse gain controls
+            row = col.row(align=True)
+            row.prop(scene, "airt_hybrid_forward_gain_db", text="Echoes")
+            row.prop(scene, "airt_hybrid_reverse_gain_db", text="Reverb") 
+            
+            # Reverb ramp timing
+            col.prop(scene, "airt_hybrid_reverb_ramp_time", text="Reverb Onset")
+            
+            # Quick preset buttons for common scenarios
+            row = hybrid_box.row(align=True)
+            row.scale_y = 0.8
+            
+            # Tunnel/Corridor preset button
+            op = row.operator("airt.hybrid_preset", text="Tunnel/Corridor")
+            op.forward_gain = 2.0
+            op.reverse_gain = -1.0  
+            op.ramp_time = 0.3
+            
+            # Cathedral preset button  
+            op = row.operator("airt.hybrid_preset", text="Cathedral")
+            op.forward_gain = -1.0
+            op.reverse_gain = 2.0
+            op.ramp_time = 0.15
+            
+            # Reset button
+            op = row.operator("airt.hybrid_preset", text="Reset")
+            op.forward_gain = 0.0
+            op.reverse_gain = 0.0
+            op.ramp_time = 0.2
         
         layout.separator()
         
