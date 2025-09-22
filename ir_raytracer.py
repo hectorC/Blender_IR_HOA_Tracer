@@ -1004,6 +1004,7 @@ def _trace_ir_reverse(context, source, receiver, bvh, obj_map, directions):
     band_one = np.ones(_NUM_BANDS, dtype=np.float32)
     quick = bool(getattr(context.scene, 'airt_quick_broadband', False))
     num_dirs = max(1, len(directions))
+    ray_weight = 1.0 / float(num_dirs)
     omit_direct = bool(getattr(context.scene, 'airt_omit_direct', False))
     thr = float(getattr(context.scene, 'airt_min_throughput', 1e-4))
     pi4 = 4.0 * pi

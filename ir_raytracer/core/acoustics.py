@@ -249,4 +249,3 @@ class MaterialProperties:
         self.transmission_amplitude = np.sqrt(self.transmission_spectrum)
         self.specular_amplitude = self.reflection_amplitude * np.sqrt(np.maximum(self.specular_fraction, 1e-6))
         self.diffuse_amplitude = self.reflection_amplitude * np.sqrt(np.maximum(self.diffuse_fraction, 1e-6))
-        self.diffuse_amplitude = self.reflection_amplitude * np.sqrt(np.maximum(self.diffuse_fraction, 1e-6))

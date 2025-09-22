@@ -63,7 +63,6 @@ class RayTracingConfig:
         
         # Output options
         self.quick_broadband = bool(getattr(scene, 'airt_quick_broadband', False))
-        self.omit_direct = bool(getattr(scene, 'airt_omit_direct', False))
         self.min_throughput = float(getattr(scene, 'airt_min_throughput', 1e-4))
         
         # Orientation
@@ -267,13 +266,15 @@ class ForwardRayTracer(ImpulseResponseRenderer):
         num_dirs = max(1, len(directions))
         ray_weight = 1.0 / float(num_dirs)
         
+        print(f"DEBUG: ForwardRayTracer starting with {num_dirs} directions, ray_weight={ray_weight:.6f}")
+        
         for d in directions:
             self._trace_single_ray(mathutils.Vector(d), source, receiver, 
                                  bvh, obj_map, band_one * ray_weight)
         
-        # Add direct path if not omitted
-        if not self.config.omit_direct:
-            self._add_direct_path(source, receiver, bvh, band_one * ray_weight)
+        # Always add direct path (omit_direct functionality removed)
+        print("DEBUG: Adding direct path...")
+        self._add_direct_path(source, receiver, bvh, band_one * ray_weight)
         
         return self.ir
     
@@ -315,8 +316,7 @@ class ForwardRayTracer(ImpulseResponseRenderer):
             if not np.any(material.reflection_spectrum > 1e-6) and material.transmission <= 1e-6:
                 break
             
-            # Segment capture for ray segments (different from direct path)
-            # Segment capture should always be allowed regardless of omit_direct setting
+            # Segment capture for ray segments 
             if self.config.segment_capture:
                 self._check_segment_capture(pos, dirn, receiver, throughput, path_length, hit_point)
             
@@ -362,11 +362,10 @@ class ForwardRayTracer(ImpulseResponseRenderer):
         view = area / max(self.config.pi4 * total_dist * total_dist, 1e-9)
         amplitude_scalar = sqrt(max(view, 0.0)) / max(total_dist, self.config.receiver_radius)
         
-        # Enhanced scaling for reverb-only scenarios
-        if self.config.omit_direct:
-            # When direct path is omitted, boost segment capture energy
-            # This compensates for the missing direct path contribution
-            amplitude_scalar *= 100.0  # Reasonable boost for reverb-only mode
+        # Add debug output for segment capture
+        delay_ms = (total_dist / self.config.speed_of_sound) * 1000.0
+        if delay_ms < 100.0:  # Only log early reflections to avoid spam
+            print(f"DEBUG: Segment capture - delay: {delay_ms:.2f}ms, distance: {total_dist:.2f}m, amplitude_scalar: {amplitude_scalar:.6f}")
         
         if self.emit_impulse(throughput, total_dist, incoming, amplitude_scalar):
             self.wrote_any = True
@@ -457,20 +456,30 @@ class ForwardRayTracer(ImpulseResponseRenderer):
         """Add direct path from source to receiver."""
         from ..utils.scene_utils import los_clear
         
-        if not los_clear(source, receiver, bvh):
-            return
-        
         direction_vec = receiver - source
         distance = direction_vec.length
+        print(f"DEBUG: Direct path distance: {distance:.3f}m")
+        
+        if not los_clear(source, receiver, bvh):
+            print("DEBUG: Direct path blocked by geometry")
+            return
         
         if distance <= 0.0:
+            print("DEBUG: Direct path distance too small")
             return
         
         incoming = (source - receiver).normalized()
         amplitude_scalar = 1.0 / max(distance, self.config.receiver_radius)
+        delay_ms = (distance / self.config.speed_of_sound) * 1000.0
+        
+        print(f"DEBUG: Direct path - delay: {delay_ms:.2f}ms, amplitude_scalar: {amplitude_scalar:.6f}")
+        print(f"DEBUG: Direct path throughput: {np.mean(throughput):.6f}")
         
         if self.emit_impulse(throughput, distance, incoming, amplitude_scalar):
+            print("DEBUG: Direct path impulse successfully added")
             self.wrote_any = True
+        else:
+            print("DEBUG: Direct path impulse failed to add")
     
     def _add_diffraction(self, hit_point: mathutils.Vector, normal: mathutils.Vector,
                         direction: mathutils.Vector, to_receiver: mathutils.Vector,
@@ -518,9 +527,8 @@ class ReverseRayTracer(ImpulseResponseRenderer):
         if num_dirs > 0:
             self.ir /= float(num_dirs)
         
-        # Add direct path if not omitted
-        if not self.config.omit_direct:
-            self._add_direct_path(source, receiver, bvh, band_one)
+        # Always add direct path (omit_direct functionality removed)
+        self._add_direct_path(source, receiver, bvh, band_one)
         
         return self.ir
     
@@ -555,10 +563,9 @@ class ReverseRayTracer(ImpulseResponseRenderer):
             if self.config.air_enable:
                 throughput *= self._calculate_air_absorption(seg_length)
             
-            # Check for direct connection to source after this bounce
-            if bounce > 0 or not self.config.omit_direct:  # Skip direct connection only on first bounce if omit_direct
-                self._check_source_connection(hit_point, normal, target, throughput, 
-                                            material, path_length, bvh, incoming_direction, bounce)
+            # Always check for direct connection to source (omit_direct functionality removed)
+            self._check_source_connection(hit_point, normal, target, throughput, 
+                                        material, path_length, bvh, incoming_direction, bounce)
             
             # Apply surface absorption
             throughput *= material.reflection_amplitude  # Use reflection amplitude, not (1 - absorption)
@@ -744,20 +751,14 @@ def trace_impulse_response(context, source: mathutils.Vector, receiver: mathutil
     user_trace_mode = context.scene.airt_trace_mode
     
     # Determine optimal strategy based on requirements
-    if config.omit_direct:
-        # Reverb-only: Use reverse tracing exclusively for efficiency
-        trace_mode = 'REVERSE'
-        print(f"Reverb-only mode: using Reverse tracing for optimal diffuse capture")
-        tracer = create_ray_tracer(trace_mode, config)
-        return tracer.trace_rays(source, receiver, bvh, obj_map, directions)
-        
-    elif user_trace_mode == 'HYBRID':
+    # Omit_direct functionality removed - always use user-selected trace mode
+    if user_trace_mode == 'HYBRID':
         # Professional hybrid approach: combine both methods
         print(f"Hybrid tracing: combining Forward (early) + Reverse (late) for optimal results")
         return _trace_hybrid(config, source, receiver, bvh, obj_map, directions)
         
     else:
-        # Legacy single-method approach for compatibility/debugging
+        # Single-method approach
         print(f"Single-method mode: {user_trace_mode}")
         tracer = create_ray_tracer(user_trace_mode, config)
         return tracer.trace_rays(source, receiver, bvh, obj_map, directions)
@@ -780,8 +781,8 @@ def _trace_hybrid(config: RayTracingConfig, source: mathutils.Vector, receiver: 
     
     # Reverse tracing for diffuse reverb tail (skip direct path)
     import copy
-    config_late = copy.deepcopy(config)  # Create copy
-    config_late.omit_direct = True  # Force omit direct for late reverb
+    config_late = copy.deepcopy(config)  # Create copy for late reverb
+    # Note: omit_direct functionality removed - reverse tracer handles direct path separately
     reverse_tracer = create_ray_tracer('REVERSE', config_late)
     ir_late = reverse_tracer.trace_rays(source, receiver, bvh, obj_map, late_rays)
     

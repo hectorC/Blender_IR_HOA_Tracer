@@ -117,10 +117,6 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
         passes = max(1, int(scene.airt_passes))
         ir = None
         
-        # Debug: Check if omit_direct is being read correctly
-        omit_direct_setting = getattr(scene, 'airt_omit_direct', False)
-        self.report({'INFO'}, f"Skip Direct Path setting: {omit_direct_setting}")
-        
         self.report({'INFO'}, f"Starting {passes} render pass(es)...")
         
         # Accumulate results with better energy handling
@@ -146,14 +142,11 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
         ir = (ir / float(passes)).astype(np.float32)
         
         # Optional direct path calibration - BUT NOT if direct path is omitted!
-        omit_direct = bool(getattr(scene, 'airt_omit_direct', False))
         should_calibrate = bool(getattr(scene, 'airt_calibrate_direct', False))
         
-        if should_calibrate and not omit_direct:
+        if should_calibrate:
             ir, cal_info = calibrate_direct_1_over_r(ir, context, source, receiver)
             self.report({'INFO'}, cal_info)
-        elif should_calibrate and omit_direct:
-            self.report({'INFO'}, "Calibration skipped: Skip Direct Path is enabled")
         
         
         # Write output file

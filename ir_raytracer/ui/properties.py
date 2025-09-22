@@ -360,12 +360,6 @@ def register_acoustic_props():
         default=False
     )
     
-    scene.airt_omit_direct = bpy.props.BoolProperty(
-        name="Skip Direct Path",
-        description="Skip the direct (unobstructed) path from source to receiver. Keeps reflections and reverb only",
-        default=False
-    )
-    
     # Internal threshold for ray termination
     scene.airt_min_throughput = bpy.props.FloatProperty(
         name="Min throughput",
@@ -404,7 +398,7 @@ def unregister_acoustic_props():
         "airt_diffraction_samples", "airt_diffraction_max_deg",
         "airt_yaw_offset_deg", "airt_invert_z", "airt_calibrate_direct",
         "airt_air_enable", "airt_air_temp_c", "airt_air_humidity", "airt_air_pressure_kpa",
-        "airt_quick_broadband", "airt_omit_direct", "airt_min_throughput"
+        "airt_quick_broadband", "airt_min_throughput"
     ]
     
     for attr in scene_attrs:

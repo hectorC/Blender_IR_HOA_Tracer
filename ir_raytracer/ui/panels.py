@@ -181,7 +181,6 @@ class AIRT_PT_AudioPanel(bpy.types.Panel):
         col.prop(scene, "airt_yaw_offset_deg", text="Yaw Offset (°)")
         col.prop(scene, "airt_invert_z", text="Invert Z-axis")
         col.prop(scene, "airt_calibrate_direct", text="Calibrate Direct Path")
-        col.prop(scene, "airt_omit_direct", text="Skip Direct Path")
 
 
 class AIRT_PT_MaterialPanel(bpy.types.Panel):
