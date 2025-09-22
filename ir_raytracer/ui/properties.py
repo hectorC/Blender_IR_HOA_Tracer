@@ -291,7 +291,7 @@ def register_acoustic_props():
     scene.airt_rr_start = bpy.props.IntProperty(
         name="Start Bounce",
         description="Bounce number to start Russian Roulette termination. Higher values = more accurate reverb tail",
-        default=30,  # Increased from 20 to 30 - be even more conservative
+        default=40,  # Increased from 30 to 40 - more conservative for occlusion scenarios
         min=0, 
         max=1000
     )
@@ -299,7 +299,7 @@ def register_acoustic_props():
     scene.airt_rr_p = bpy.props.FloatProperty(
         name="Survival Probability",
         description="Probability ray survives Russian Roulette. Higher values = longer reverb tails, slower performance",
-        default=0.97,  # Increased from 0.95 to 0.97 - even higher survival rate
+        default=0.99,  # Increased from 0.97 to 0.99 - even higher survival rate for occlusion
         min=0.05, 
         max=1.0
     )

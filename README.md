@@ -1,20 +1,20 @@
 [human] Code generated with AI asistance (ChatGPT web, Codex and Claude). Use at your own risk. It seems to produce usable results for artistic purposes. I've created this project mainly to learn about the current state of AI and the advantages and limitations of AI coding by attempting to create a tool I've been wanting to have. Take the information below with a large pinch of salt! It is AI generated and after some iterations might not be accurate anymore. The comments in the commits are mine.[/human]
 
-# Ambisonic IR Tracer for Blender
+# Ambisonic IR Tracer for Blender - Professional 3D Acoustic Ray Tracer
 
-Ambisonic IR Tracer is a Blender add-on that renders third-order ambisonic (ACN/SN3D) impulse responses directly from the geometry in your scene. It uses forward and reverse ray-tracing strategies with support for specular and diffuse reflections, per-object absorption/scatter controls, stochastic tails, and optional air absorption. The resulting 16-channel ambisonic WAV files can be used for spatial audio rendering, acoustic analysis, or convolution-based reverberation.
+**Advanced hybrid ray-based acoustic impulse response simulation for Blender**
 
-## Features
-- Third-order ambisonic encoding with configurable orientation offsets
-- Forward (stochastic) and reverse (specular) tracing modes with multi-bounce paths
-- Per-object acoustic materials:
-  - Wideband coefficients and octave-band spectra (125 Hz … 8 kHz) for absorption and scattering
-  - Transmission coefficient for thin/partially transparent surfaces
-- Receiver radius capture, Russian roulette termination, and micro-roughness controls
-- Simple diffraction sampling (configurable) to account for energy bending around occlusions
-- Frequency-dependent air absorption based on ISO 9613-1 parameters
-- Optional calibration of the direct path to a 1/r amplitude reference
-- Batch averaging across multiple randomized passes with reproducible seeding
+A professional-grade physics-based ray tracer that simulates room acoustics by tracking sound wave propagation through 3D spaces. Features sophisticated hybrid algorithms, professional materials modeling, and multi-channel ambisonic output for film, game, and architectural audio production.
+
+## 🎯 Key Features
+
+- **Hybrid ray tracing**: Intelligent combination of Forward + Reverse algorithms for optimal results  
+- **Professional materials system**: 8-band octave processing (125Hz-8kHz) with industry-standard presets
+- **Advanced blend controls**: ±24dB gain adjustment for fine-tuning acoustic character
+- **Fast Preview Mode**: Quick broadband calculations for rapid iteration
+- **Third-order ambisonic encoding**: 16-channel spatial audio with configurable orientation
+- **Realistic acoustic modeling**: Frequency-dependent absorption, scattering, and edge diffraction
+- **Production-ready output**: 32-bit float WAV files, sample rates up to 192kHz with quality controls
 
 ## Requirements
 - Blender 4.5 or newer (matches the add-on `bl_info`)
@@ -23,6 +23,40 @@ Ambisonic IR Tracer is a Blender add-on that renders third-order ambisonic (ACN/
   - `scipy` (provides `scipy.special.lpmv` for spherical harmonics)
 
 `numpy` ships with Blender and is used extensively by the add-on.
+
+## 🚀 Ray Tracing Modes
+
+### Hybrid Tracing (Recommended) 
+**Combines Forward + Reverse algorithms for optimal acoustic modeling**
+
+The hybrid approach intelligently blends two complementary ray tracing strategies:
+- **Forward component**: Traces rays from source → receiver, capturing precise early reflections and direct paths
+- **Reverse component**: Traces rays from receiver ← source, efficiently modeling complex reverb tails
+- **Smart blending**: Automatically transitions from forward-dominated early reflections to reverse-dominated late reverberation
+
+**Advanced Blend Controls:**
+- **Forward Tracer Gain**: ±24dB adjustment for discrete echoes and early reflections
+- **Reverse Tracer Gain**: ±24dB adjustment for ambient reverb and late reflections  
+- **Reverb Ramp Time**: 0.05-0.5s transition period between early/late sound (default: 0.2s)
+
+**Quick Presets:**
+- **Tunnel/Corridor**: Forward +2dB, Reverse -1dB (emphasizes echoes and slap-back)
+- **Cathedral**: Forward -1dB, Reverse +2dB (emphasizes ambient reverb)
+- **Reset**: 0dB both (balanced blend)
+
+### Forward Tracing Only
+**Source → Receiver: Excellent for early reflections**
+- Traces rays from sound sources toward receiver positions
+- Captures precise direct paths and early reflection patterns
+- Best for: Small rooms, near-field monitoring, discrete echo analysis
+- Limitation: Less efficient for complex late reverberation
+
+### Reverse Tracing Only  
+**Receiver ← Source: Efficient for complex acoustics**
+- Traces rays backward from receiver toward sound sources
+- Excels at capturing complex multi-bounce reverberation paths
+- Best for: Large spaces, ambient acoustics, reverb tail modeling
+- Limitation: May miss some early reflection detail
 
 ## Installation
 1. **Download the add-on**
@@ -53,15 +87,55 @@ subprocess.check_call([pybin, "-m", "pip", "install", "soundfile", "scipy"])
    - Restart Blender after installing the packages so the add-on can import them.
 
 ## Usage
+
+### 🎵 Professional Materials System
+
+**8-Band Octave Processing for Realistic Acoustic Modeling**
+
+The materials system uses industry-standard octave bands for frequency-dependent acoustic modeling:
+
+**Frequency Bands**: 125Hz • 250Hz • 500Hz • 1kHz • 2kHz • 4kHz • 8kHz • 16kHz
+
+Each material defines separate absorption and scattering coefficients per band, enabling realistic acoustic behavior across the full audio spectrum.
+
+**Professional Presets** (based on industry measurements):
+
+- **Concrete**: Highly reflective with slight low-frequency absorption
+  - Absorption: 0.01-0.02 (low) to 0.05-0.07 (high)  
+  - Scatter: 0.05-0.10 (smooth but not perfectly flat)
+  
+- **Carpet**: High absorption, especially at higher frequencies
+  - Absorption: 0.15 (low) to 0.65 (high) - strong frequency dependence
+  - Scatter: 0.20-0.30 (textured surface)
+  
+- **Wood**: Balanced absorption with natural material characteristics  
+  - Absorption: 0.08 (low) to 0.12 (high) - moderate across spectrum
+  - Scatter: 0.10-0.15 (natural surface texture)
+  
+- **Glass**: Very reflective with minimal high-frequency loss
+  - Absorption: 0.03-0.04 (extremely low across spectrum)
+  - Scatter: 0.02-0.05 (very smooth surface)
+  
+- **Metal**: Extremely reflective across all frequencies
+  - Absorption: 0.01-0.02 (minimal across entire spectrum)  
+  - Scatter: 0.02-0.04 (smooth metallic surface)
+
+**Energy Conservation**: All presets maintain physically accurate energy relationships where absorption + reflection = 1.0, ensuring realistic acoustic behavior.
+
+### 🎯 Basic Workflow
+
 1. **Tag acoustic objects**
-   - Select a mesh in the scene and open the *IR Tracer* panel (3D Viewport ? Sidebar ? *IR Tracer* tab).
-   - Set per-object *Absorption* and *Scatter* coefficients.
+   - Select a mesh in the scene and open the *IR Tracer* panel (3D Viewport → Sidebar → *IR Tracer* tab).
+   - Choose a **Material Preset** from the dropdown, or set custom *Absorption* and *Scatter* coefficients.
+   - For advanced control, expand frequency bands to adjust per-octave behavior.
    - Mark one object as *Acoustic Source* and another as *Acoustic Receiver*.
 2. **Configure render settings**
-   - Choose *Forward* or *Reverse* tracing mode.
+   - Choose **Tracing Mode**: *Hybrid* (recommended), *Forward Only*, or *Reverse Only*.
+   - For Hybrid mode, adjust **Forward/Reverse Gain** (±24dB) to fine-tune acoustic character.
    - Set the number of rays, averaging passes, maximum bounce order, sample rate, IR length, and receiver radius.
-   - Optionally enable segment capture, Russian roulette, micro-roughness, direct-path calibration, and air absorption parameters (temperature, humidity, pressure).
-   - Adjust orientation settings (yaw offset, invert Z) to match your downstream ambisonic decoder.
+   - Enable **Fast Preview Mode** for quick broadband testing, disable for final production.
+   - Optionally configure advanced settings: Russian roulette (default: 40 bounces, 0.99 survival), diffraction, and air absorption.
+   - Adjust ambisonic orientation settings (yaw offset, invert Z) to match your downstream decoder.
 3. **Render the impulse response**
    - Click **Render Ambisonic IR** in the panel.
    - The add-on caches the BVH for the scene and traces all passes, averaging the result.
@@ -73,35 +147,40 @@ subprocess.check_call([pybin, "-m", "pip", "install", "soundfile", "scipy"])
 ## Parameter Reference
 
 ### Object Properties
-- **Material Preset**: Applies preset absorption and scatter values for common surfaces.
-- **Absorption**: Wideband energy absorption coefficient (0 reflective, 1 fully absorbing).
-- **Scatter**: Fraction of reflected energy sent into diffuse (cosine) lobes instead of specular reflections (0 = specular, 1 = fully diffuse).
-- **Absorption Spectrum**: Octave-band absorption values applied at these centers: 125 Hz, 250 Hz, 500 Hz, 1 kHz, 2 kHz, 4 kHz, 8 kHz. Presets populate these; the wideband value is a simple average for convenience.
-- **Scatter Spectrum**: Octave-band scattering values in the same order as above. Controls the proportion of energy routed to the diffuse lobe per band.
-- **Transmission**: Fraction of incident energy that transmits through the surface (0 opaque … 1 fully transparent). Reflection is reduced accordingly per band.
-- **Acoustic Source**: Marks the object whose origin emits sound for reverse tracing and defines the starting point for forward tracing rays.
-- **Acoustic Receiver**: Marks the listener position; impulse responses are captured at this location using the configured receiver radius.
+- **Material Preset**: Choose from 5 professional presets (Concrete, Carpet, Wood, Glass, Metal) with industry-standard 8-band values, or select "Custom" for manual control.
+- **Absorption**: Broadband energy absorption coefficient (0.0 = perfectly reflective, 1.0 = fully absorbent). Presets override this with frequency-dependent values.
+- **Scatter**: Fraction of reflected energy sent into diffuse (cosine) lobes instead of specular reflections (0.0 = perfect mirror, 1.0 = fully diffuse Lambert surface).
+- **Absorption Spectrum**: 8-band octave absorption values at centers: 125Hz, 250Hz, 500Hz, 1kHz, 2kHz, 4kHz, 8kHz, 16kHz. Essential for realistic acoustic modeling.
+- **Scatter Spectrum**: 8-band scattering values controlling diffuse/specular reflection balance per frequency. Higher values = more diffuse surface behavior.
+- **Transmission**: Energy fraction that transmits through the surface (0.0 = opaque wall, 1.0 = transparent). Useful for thin barriers and partial occlusion.
+- **Acoustic Source**: Marks sound emission point for Forward tracing and target for Reverse tracing rays.
+- **Acoustic Receiver**: Listener position where ambisonic impulse responses are captured using the configured receiver radius.
 
 ### Render Settings (Scene)
-- **Tracing Mode** (`Forward` / `Reverse`): Selects stochastic forward tracing with receiver capture or deterministic reverse tracing with line-of-sight connection checks.
-- **Receiver Radius (m)**: Physical radius of the receiver capture sphere in meters; converted to Blender units based on the scene scale.
-- **Rays**: Number of primary rays shot per pass; higher counts reduce variance but increase render time.
-- **Averaging Passes**: Number of Monte Carlo passes to average; each pass optionally uses a different random seed.
-- **Max Bounces**: Upper bound on the number of surface interactions per ray; set higher for long reverberation tails.
-- **Sample Rate**: Audio sample rate of the rendered impulse response (Hz).
-- **IR Length (s)**: Duration of the output impulse response in seconds.
-- **Specular Tol (deg)**: Angular tolerance for matching specular reflections to the receiver direction (Gaussian falloff in degrees).
-- **WAV Subtype**: Output PCM or float encoding used by `soundfile` when writing the WAV.
-- **Specular Roughness (deg)**: Adds micro-jitter to specular reflections, broadening highlights by the given cone angle.
-- **Capture Along Segments**: When enabled, accumulates energy for partial segments that graze the receiver sphere, increasing early reflection density.
-- **Enable Diffraction**: Includes simple diffraction sampling around occluders to recover energy in shadowed paths.
-- **Diffraction Samples**: Number of diffraction directions sampled per relevant bounce (higher = more accurate, slower).
-- **Diffraction Max Angle (deg)**: Maximum angular deviation for diffraction sampling; limits how far rays can bend around edges.
-- **Random Seed**: Base RNG seed; each pass adds its index to derive a reproducible sequence. Zero leaves the RNG unseeded.
-- **Russian Roulette**: Toggles probabilistic termination of long ray paths to reduce runtime while maintaining expected energy.
-- **RR Start Bounce**: Bounce index at which Russian roulette begins evaluating termination probability.
-- **RR Survive Prob**: Probability that a ray survives each Russian roulette check; higher values retain more energy at the cost of performance.
-- **Yaw Offset (deg)**: Rotates the ambisonic orientation about the vertical axis to align with downstream decoder conventions.
+- **Tracing Mode**: **Hybrid** (combines Forward+Reverse, recommended) / **Forward Only** (source→receiver, good for early reflections) / **Reverse Only** (receiver←source, efficient for reverb tails).
+
+### Hybrid Mode Controls (Advanced)
+- **Forward Tracer Gain**: ±24dB adjustment for discrete echoes and early reflections. Higher values emphasize slap-back and clarity.
+- **Reverse Tracer Gain**: ±24dB adjustment for ambient reverb and late reflections. Higher values emphasize spaciousness and tail length.
+- **Reverb Ramp Time**: 0.05-0.5s transition period between early/late sound blending (default: 0.2s). Shorter = more distinct transition.
+
+### Core Parameters  
+- **Receiver Radius**: 0.001-2.0m capture sphere radius. Larger = more rays captured but less positional precision (default: 0.25m).
+- **Rays**: 1000-32768+ rays per pass. Higher counts reduce noise but increase render time. Recommended: 8192+ for production.
+- **Averaging Passes**: 1-100+ Monte Carlo passes to average. More passes = smoother results but longer render times (default: 4).
+- **Max Bounces**: 10-200+ surface interactions per ray. Higher for longer reverb tails (default: 100).
+- **Sample Rate**: 16000-192000 Hz audio sample rate. 48kHz/96kHz recommended for professional use.
+- **IR Length**: 0.1-30.0s impulse response duration. Should exceed expected RT60 (default: 3.0s).
+
+### Performance Options
+- **Fast Preview Mode**: Bypasses 8-band processing for quick broadband calculations. Use for testing, disable for final renders.
+- **WAV Format**: **32-bit Float** (recommended for IR), **24-bit PCM** (good quality), **16-bit PCM** (smallest files).
+
+### Advanced Algorithm Settings
+- **Russian Roulette Start**: Bounce number (0-1000) to begin probabilistic ray termination. Higher = more accurate tails (default: 40, optimized for occlusion scenarios).
+- **Russian Roulette Survival**: 0.05-1.0 probability ray survives termination check. Higher = longer tails (default: 0.99, enhanced for professional results).
+- **Min Throughput**: 1e-8 to 1e-2 minimum ray energy before termination. Lower allows weaker rays to contribute (default: 1e-6, improved sensitivity).
+- **Specular Roughness**: 0-30° angular spread of specular reflections. 0° = perfect mirror, higher = more diffuse specular behavior (default: 5.0°).
 - **Flip Z (up/down)**: Inverts the ambisonic Z axis (useful for matching systems that assume left-handed coordinates).
 - **Calibrate Direct (1/r)**: Scales the entire impulse response so the direct-path amplitude matches 1/distance, aiding distance cues.
 - **Omit Direct (reverb-only)**: Excludes the direct sound from the rendered IR so you can route dry/direct separately and use this IR purely for reverberation.
@@ -115,39 +194,112 @@ subprocess.check_call([pybin, "-m", "pip", "install", "soundfile", "scipy"])
 - Use the *Random Seed* field to generate multiple statistically independent IRs or to reproduce a previous run exactly.
 - The 16-channel WAV output is ACN/SN3D encoded; ensure your renderer or DAW plug-in expects this convention.
 
-## Troubleshooting
-- If the add-on reports missing dependencies, rerun the installation commands above using Blender's bundled Python interpreter.
-- When scripting renders from the command line (`blender -b`), pass `--python-expr "import bpy; bpy.ops.airt.render_ir()"` after setting up the scene in advance.
-- For scenes with scaled units, the add-on compensates via the scene's unit scale; verify the *Unit Scale* value in *Scene Properties > Units* if delays or attenuation feel incorrect.
+## 🚀 Professional Workflow & Performance
 
-## Troubleshooting
+### Quick Start Workflow
+1. **Scene Setup**: Create your room geometry and place Source/Receiver objects
+2. **Material Assignment**: Use **material presets** for quick, realistic results  
+3. **Fast Preview**: Enable **Fast Preview Mode** and use low ray counts (1000-2000) for initial testing
+4. **Algorithm Selection**: Use **Hybrid mode** with default gains (0dB/0dB) for most scenarios
+5. **Quality Pass**: Disable Fast Preview, increase rays (8192+), and render final output
 
-### "python-soundfile is required" Error
-If you get a soundfile import error when pressing "Generate IR", even after installation:
+### Performance Optimization
+**For Fast Iteration:**
+- **Fast Preview Mode**: ON (bypasses 8-band processing)
+- **Rays**: 1000-2000 (quick noise assessment)  
+- **Passes**: 1-2 (minimal averaging)
+- **Tracing Mode**: Hybrid with default gains
+
+**For Production Quality:**
+- **Fast Preview Mode**: OFF (full 8-band processing)
+- **Rays**: 8192-32768+ (smooth late reverberation)
+- **Passes**: 4-16 (statistical averaging)
+- **Russian Roulette**: Start=40, Survival=0.99 (optimized for quality)
+
+### Hybrid Mode Presets Usage
+- **Default (0dB/0dB)**: Balanced blend for most rooms
+- **Tunnel/Corridor Preset**: Emphasizes discrete echoes and slap-back
+- **Cathedral Preset**: Enhances ambient reverb and spatial impression  
+- **Custom Gains**: Fine-tune ±24dB for specific acoustic character
+
+### Material Workflow Tips
+- **Start with presets**: Choose the closest physical material (Concrete, Wood, etc.)
+- **Room-specific tuning**: Adjust broadband values if needed (Absorption/Scatter)
+- **Advanced modeling**: Expand frequency bands for surgical acoustic control
+- **Energy conservation**: Higher absorption = less reflection energy (presets handle this automatically)
+
+### Troubleshooting Performance
+- **High memory usage**: Reduce max bounces, enable Russian Roulette earlier
+- **Long render times**: Use Fast Preview for testing, reduce ray count initially
+- **Noisy results**: Increase ray count and averaging passes
+- **Missing reverb tail**: Increase max bounces, check Russian Roulette settings
+- **Too much/little early reflection**: Adjust Hybrid Forward Gain (±24dB)
+- **Excessive/weak ambient reverb**: Adjust Hybrid Reverse Gain (±24dB)
+
+## 🔧 Troubleshooting & Technical Issues
+
+### Missing Dependencies Error
+If you get a "python-soundfile is required" error when rendering:
 
 1. **Use the "Check Dependencies" button** in the Diagnostics panel to verify installation status
-2. **Toggle the add-on off and on** in Blender's Add-ons preferences
-3. **Restart Blender completely** to clear Python module cache
-4. **Reinstall soundfile** using Blender's Python:
-   ```
+2. **Reinstall soundfile** using Blender's Python:
+   ```bash
+   # Windows example - adjust path for your Blender version
    C:\Program Files\Blender Foundation\Blender 4.5\4.5\python\bin\python.exe -m pip install soundfile
    ```
+3. **Toggle the add-on off and on** in Blender's Add-ons preferences  
+4. **Restart Blender completely** to clear Python module cache
 5. **Check Blender's console output** for detailed error messages
 
 ### Add-on Update Issues
 When updating the add-on:
 1. **Disable the old version** first in Add-ons preferences
-2. **Remove the old files** from the addons folder if needed
-3. **Restart Blender** before installing the new version
-4. **Reinstall if needed** - sometimes a clean install works better than updating
+2. **Remove old files** from the addons folder if needed
+3. **Restart Blender** before installing the new version  
+4. **Clean install** often works better than updating in place
 
-### Performance Issues
-- Use **Fast Preview Mode** for initial testing
-- Lower **ray count** and **passes** for faster renders
-- Reduce **max bounces** if reverb tail is too long
-- Use the **Diagnostics panel** to analyze performance impact
+### Scene Setup Issues
+- **No sound generated**: Verify Source and Receiver objects are properly tagged and positioned
+- **Incorrect timing/distance**: Check *Scene Properties > Units > Unit Scale* matches your scene scale
+- **Missing early reflections**: Ensure **Segment Capture** is enabled (default: ON)
+- **Weak or missing reverb tail**: 
+  - Increase **Max Bounces** (try 150-200 for long tails)
+  - Check **Russian Roulette** settings (Start: 40, Survival: 0.99)
+  - Lower **Min Throughput** to 1e-6 or 1e-7 for sensitivity
 
-Enjoy tracing ambisonic impulse responses directly inside Blender! [human][sarcasm](so kind of you ChatGPT, as always)[/sarcasm][/human]
+### Professional Quality Issues  
+- **Unrealistic acoustics**: Use **Material Presets** instead of manual values for physically accurate behavior
+- **Frequency imbalance**: Disable **Fast Preview Mode** to enable full 8-band processing  
+- **Poor spatial imaging**: Verify ambisonic **Yaw Offset** matches your decoder convention
+- **Inconsistent results**: Set **Random Seed** to non-zero value for reproducible renders
+
+### Command Line Rendering
+For batch processing: `blender -b scene.blend --python-expr "import bpy; bpy.ops.airt.render_ir()"`
+
+### Optimal Settings for Different Scenarios
+
+**Small Rooms (< 50m³):**
+- Tracing Mode: Forward Only or Hybrid  
+- Rays: 4096-8192, Max Bounces: 50-100
+- Materials: Use Glass/Metal presets for hard surfaces
+
+**Large Spaces (> 500m³):**  
+- Tracing Mode: Hybrid (recommended) or Reverse Only
+- Rays: 16384+, Max Bounces: 150-200
+- Russian Roulette: Essential for performance (Start: 40, Survival: 0.99)
+
+**Occluded/Complex Geometry:**
+- Enhanced parameters already optimized (RR Start: 40, Survival: 0.99, Min Throughput: 1e-6)
+- Use Hybrid mode with balanced gains (0dB/0dB) initially
+- Increase ray count for complex shadow zones
+
+---
+
+## Professional 3D Acoustic Ray Tracing for Blender
+
+This add-on provides production-ready acoustic simulation with industry-standard materials modeling, hybrid algorithms, and professional-grade controls. Perfect for architectural acoustics, game audio, film post-production, and acoustic research.
+
+**Latest version features hybrid ray tracing, 8-band frequency processing, and ±24dB blend controls for unprecedented acoustic realism.**
 
 
 

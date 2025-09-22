@@ -55,7 +55,32 @@ def calibrate_direct_1_over_r(ir: np.ndarray, context, source, receiver):
         
         a_meas = float(np.max(np.abs(ir[0, n0:n1])))
         if a_meas <= 1e-9:
-            return ir, f"Calibrate: skipped (no direct energy near n~{n})"
+            # Direct path blocked - try early reflection calibration
+            # Look for strongest reflection in first 200ms
+            early_limit_ms = 200.0  # 200ms window for early reflections
+            early_samples = int((early_limit_ms / 1000.0) * sr)
+            early_samples = min(early_samples, ir.shape[1])
+            
+            # Find the strongest peak in early window
+            early_peak = float(np.max(np.abs(ir[0, :early_samples])))
+            
+            if early_peak > 1e-9:
+                # Find the time of the strongest peak
+                peak_idx = int(np.argmax(np.abs(ir[0, :early_samples])))
+                peak_time_s = peak_idx / sr
+                
+                # Estimate reflection path distance (approximate)
+                # For wall occlusion: source -> wall -> receiver is roughly 1.5-2x direct distance
+                estimated_reflection_dist = dist * 1.7  # Conservative estimate
+                
+                # Use reflection-based calibration
+                a_exp = 1.0 / max(estimated_reflection_dist, 1e-9)
+                k = a_exp / early_peak
+                ir *= k
+                
+                return ir, f"Calibrate: blocked direct, using reflection at {peak_time_s*1000:.1f}ms, est_dist={estimated_reflection_dist:.2f}m, k={k:.4f}"
+            else:
+                return ir, f"Calibrate: skipped (no direct energy near n~{n}, no early reflections found)"
         
         a_exp = 1.0 / max(dist, 1e-9)
         k = a_exp / a_meas

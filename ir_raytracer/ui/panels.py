@@ -87,7 +87,7 @@ class AIRT_PT_Panel(bpy.types.Panel):
             
             # Forward/Reverse gain controls
             row = col.row(align=True)
-            row.prop(scene, "airt_hybrid_forward_gain_db", text="Echoes")
+            row.prop(scene, "airt_hybrid_forward_gain_db", text="Early")
             row.prop(scene, "airt_hybrid_reverse_gain_db", text="Reverb") 
             
             # Reverb ramp timing
