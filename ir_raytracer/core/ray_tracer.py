@@ -528,15 +528,24 @@ class ReverseRayTracer(ImpulseResponseRenderer):
                                  band_one, incoming_direction)
             rays_traced += 1
         
-        # FIXED: Remove ALL normalization for reverse tracer
-        # The reverse tracer makes 311k connections and accumulates energy correctly.
-        # Any normalization kills the accumulated energy from all connections.
-        # Let the accumulated energy speak for itself!
+        # SIMPLIFIED: Much gentler normalization approach
+        # The issue: aggressive normalization is killing late energy
         if num_dirs > 0:
             ir_max_before = np.max(np.abs(self.ir))
-            # NO NORMALIZATION - just track the energy for debug
-            ir_max_after = ir_max_before  # Same since no division
-            print(f"DEBUG: IR normalization - Before: {ir_max_before:.2e}, After: {ir_max_after:.2e}, Factor: 1.00e+00 (NO NORMALIZATION)")
+            
+            # Check if we're likely in hybrid mode (fewer rays)
+            if num_dirs < 6000:  # Likely hybrid mode (half of typical 8192)
+                # GENTLE normalization for hybrid compatibility - preserve most energy
+                self.ir /= 50.0  # Much gentler than /1000
+                norm_factor = 1.0/50.0
+                print(f"DEBUG: HYBRID-mode IR normalization - Before: {ir_max_before:.2e}, Factor: {norm_factor:.2e}")
+            else:
+                # Standalone mode: no normalization (preserve RT60)
+                norm_factor = 1.0
+                print(f"DEBUG: STANDALONE-mode IR (no normalization) - Before: {ir_max_before:.2e}, Factor: {norm_factor:.2e}")
+            
+            ir_max_after = np.max(np.abs(self.ir))
+            print(f"DEBUG: IR normalization result - After: {ir_max_after:.2e}")
         
         # Always add direct path (omit_direct functionality removed)
         print("DEBUG: Adding direct path (reverse tracer)...")
@@ -847,18 +856,90 @@ def _blend_early_late(ir_early: np.ndarray, ir_late: np.ndarray, config: RayTrac
     samples = ir_early.shape[1]
     time_axis = np.arange(samples) / config.sample_rate
     
-    # Early weight: strong initially, fades after transition
-    early_weight = np.exp(-np.maximum(0, time_axis - transition_time_sec) * 10)
+    # ENERGY MATCHING: Scale tracers to similar energy levels before crossfade
+    # Measure energy in overlapping regions to match levels
+    early_peak_region = slice(0, int(0.15 * config.sample_rate))  # 0-150ms
+    late_peak_region = slice(int(0.05 * config.sample_rate), int(0.3 * config.sample_rate))  # 50-300ms
     
-    # Late weight: grows after transition
-    late_weight = 1.0 - early_weight * 0.7  # Allow some overlap
+    early_rms = np.sqrt(np.mean(ir_early[:, early_peak_region] ** 2))
+    late_rms = np.sqrt(np.mean(ir_late[:, late_peak_region] ** 2))
     
-    # Apply weighting
+    # Scale reverse tracer to match forward energy level
+    if late_rms > 0 and early_rms > 0:
+        energy_match_factor = early_rms / late_rms
+        ir_late_scaled = ir_late * energy_match_factor
+        print(f"  DEBUG: Energy matching - Forward RMS: {early_rms:.6f}, Reverse RMS: {late_rms:.6f}")
+        print(f"  DEBUG: Scaling Reverse by factor: {energy_match_factor:.6f}")
+    else:
+        ir_late_scaled = ir_late
+        print(f"  DEBUG: Energy matching skipped (zero RMS)")
+    
+    # EXTENDED crossfade for smoother transition
+    crossfade_width = 0.15  # 150ms crossfade region (was 50ms)
+    crossfade_start = transition_time_sec - crossfade_width/2
+    crossfade_end = transition_time_sec + crossfade_width/2
+    
+    # Create smooth crossfade weights using cosine interpolation for gentler transition
+    early_weight = np.ones_like(time_axis)
+    late_weight = np.zeros_like(time_axis)
+    
+    # Before crossfade: pure Forward
+    mask_early = time_axis < crossfade_start
+    early_weight[mask_early] = 1.0
+    late_weight[mask_early] = 0.0
+    
+    # After crossfade: pure Reverse  
+    mask_late = time_axis > crossfade_end
+    early_weight[mask_late] = 0.0
+    late_weight[mask_late] = 1.0
+    
+    # During crossfade: smooth cosine transition (gentler than linear)
+    mask_crossfade = (time_axis >= crossfade_start) & (time_axis <= crossfade_end)
+    if np.any(mask_crossfade):
+        # Cosine interpolation for smoother transition
+        linear_progress = (time_axis[mask_crossfade] - crossfade_start) / crossfade_width
+        # Convert linear to cosine for gentler curves
+        cosine_progress = 0.5 * (1.0 - np.cos(np.pi * linear_progress))
+        early_weight[mask_crossfade] = 1.0 - cosine_progress
+        late_weight[mask_crossfade] = cosine_progress
+    
+    # Apply weighting with detailed debugging
     ir_combined = np.zeros_like(ir_early)
+    
+    # Debug: Check individual tracer energies before blending
+    early_max = np.max(np.abs(ir_early))
+    late_max = np.max(np.abs(ir_late_scaled))
+    print(f"  DEBUG: Forward max energy: {early_max:.6f}")
+    print(f"  DEBUG: Reverse max energy (scaled): {late_max:.6f}")
+    
     for ch in range(ir_early.shape[0]):
         ir_combined[ch, :] = (ir_early[ch, :] * early_weight + 
-                              ir_late[ch, :] * late_weight)
+                              ir_late_scaled[ch, :] * late_weight)
     
-    print(f"  Blended at {transition_time_sec*1000:.0f}ms transition point")
+    combined_max_before = np.max(np.abs(ir_combined))
+    print(f"  DEBUG: Combined max energy before norm: {combined_max_before:.6f}")
+    
+    # GENTLE normalization - only if really needed
+    target_max = 0.5  # Less aggressive normalization (was 0.1)
+    if combined_max_before > target_max:
+        normalization_factor = target_max / combined_max_before
+        ir_combined *= normalization_factor
+        combined_max_after = np.max(np.abs(ir_combined))
+        print(f"  DEBUG: Applied gentle normalization: {combined_max_before:.6f} → {combined_max_after:.6f} (factor: {normalization_factor:.6f})")
+    else:
+        print(f"  DEBUG: No normalization needed")
+    
+    # Debug: Check energy distribution over time
+    sample_rate = getattr(config, 'sample_rate', 48000)
+    early_samples = int(0.1 * sample_rate)  # First 100ms
+    mid_samples = int(0.5 * sample_rate)    # Up to 500ms
+    
+    early_energy = np.sum(ir_combined[:, :early_samples] ** 2)
+    mid_energy = np.sum(ir_combined[:, early_samples:mid_samples] ** 2) 
+    late_energy = np.sum(ir_combined[:, mid_samples:] ** 2)
+    
+    print(f"  DEBUG: Energy distribution - Early: {early_energy:.6f}, Mid: {mid_energy:.6f}, Late: {late_energy:.6f}")
+    
+    print(f"  Smooth crossfade: {crossfade_start*1000:.0f}-{crossfade_end*1000:.0f}ms ({crossfade_width*1000:.0f}ms width)")
     
     return ir_combined
