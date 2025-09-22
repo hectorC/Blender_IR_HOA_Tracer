@@ -846,81 +846,80 @@ def _trace_hybrid(config: RayTracingConfig, source: mathutils.Vector, receiver: 
 
 
 def _blend_early_late(ir_early: np.ndarray, ir_late: np.ndarray, config: RayTracingConfig) -> np.ndarray:
-    """Blend early and late contributions with time-based weighting."""
+    """Blend early and late contributions using ADDITIVE approach - preserves discrete echoes."""
     
-    # Transition time: early reflections dominate before this, late reverb after
-    transition_time_sec = 0.1  # 100ms transition point (typical for rooms)
-    transition_sample = int(transition_time_sec * config.sample_rate)
+    # ADDITIVE BLENDING: Keep Forward 100% throughout, gradually add Reverse
+    # This preserves discrete echoes (tunnel reflections) while adding diffuse reverb
     
     # Create time-based weighting functions
     samples = ir_early.shape[1]
     time_axis = np.arange(samples) / config.sample_rate
     
-    # ENERGY MATCHING: Scale tracers to similar energy levels before crossfade
-    # Measure energy in overlapping regions to match levels
+    # ENERGY SCALING for additive combination
+    # Scale Reverse tracer for additive blend (not energy matching like crossfade)
     early_peak_region = slice(0, int(0.15 * config.sample_rate))  # 0-150ms
-    late_peak_region = slice(int(0.05 * config.sample_rate), int(0.3 * config.sample_rate))  # 50-300ms
+    late_peak_region = slice(int(0.1 * config.sample_rate), int(0.4 * config.sample_rate))  # 100-400ms
     
     early_rms = np.sqrt(np.mean(ir_early[:, early_peak_region] ** 2))
     late_rms = np.sqrt(np.mean(ir_late[:, late_peak_region] ** 2))
     
-    # Scale reverse tracer to match forward energy level
+    # For additive blend: scale Reverse to complement Forward (not replace it)
     if late_rms > 0 and early_rms > 0:
-        energy_match_factor = early_rms / late_rms
-        ir_late_scaled = ir_late * energy_match_factor
-        print(f"  DEBUG: Energy matching - Forward RMS: {early_rms:.6f}, Reverse RMS: {late_rms:.6f}")
-        print(f"  DEBUG: Scaling Reverse by factor: {energy_match_factor:.6f}")
+        # Scale Reverse to be complementary addition (smaller factor than crossfade)
+        additive_scale_factor = (early_rms / late_rms) * 0.6  # 60% of energy match for addition
+        ir_late_scaled = ir_late * additive_scale_factor
+        print(f"  DEBUG: Additive scaling - Forward RMS: {early_rms:.6f}, Reverse RMS: {late_rms:.6f}")
+        print(f"  DEBUG: Reverse scaled by: {additive_scale_factor:.6f} (for additive blend)")
     else:
-        ir_late_scaled = ir_late
-        print(f"  DEBUG: Energy matching skipped (zero RMS)")
+        ir_late_scaled = ir_late * 0.5  # Default conservative scaling
+        print(f"  DEBUG: Using default Reverse scaling: 0.5")
     
-    # EXTENDED crossfade for smoother transition
-    crossfade_width = 0.15  # 150ms crossfade region (was 50ms)
-    crossfade_start = transition_time_sec - crossfade_width/2
-    crossfade_end = transition_time_sec + crossfade_width/2
+    # ADDITIVE WEIGHTING: Forward always 100%, Reverse ramps up over time
+    reverse_ramp_start = 0.05   # 50ms - start adding reverse
+    reverse_ramp_end = 0.2      # 200ms - full reverse addition
     
-    # Create smooth crossfade weights using cosine interpolation for gentler transition
-    early_weight = np.ones_like(time_axis)
-    late_weight = np.zeros_like(time_axis)
+    # Forward weight: Always 1.0 (preserve all discrete echoes)
+    forward_weight = np.ones_like(time_axis)
     
-    # Before crossfade: pure Forward
-    mask_early = time_axis < crossfade_start
-    early_weight[mask_early] = 1.0
-    late_weight[mask_early] = 0.0
+    # Reverse weight: Smooth ramp from 0 to 1
+    reverse_weight = np.zeros_like(time_axis)
     
-    # After crossfade: pure Reverse  
-    mask_late = time_axis > crossfade_end
-    early_weight[mask_late] = 0.0
-    late_weight[mask_late] = 1.0
+    # Before ramp: no reverse
+    mask_early = time_axis < reverse_ramp_start
+    reverse_weight[mask_early] = 0.0
     
-    # During crossfade: smooth cosine transition (gentler than linear)
-    mask_crossfade = (time_axis >= crossfade_start) & (time_axis <= crossfade_end)
-    if np.any(mask_crossfade):
-        # Cosine interpolation for smoother transition
-        linear_progress = (time_axis[mask_crossfade] - crossfade_start) / crossfade_width
-        # Convert linear to cosine for gentler curves
+    # After ramp: full reverse addition
+    mask_late = time_axis > reverse_ramp_end
+    reverse_weight[mask_late] = 1.0
+    
+    # During ramp: smooth increase using cosine
+    mask_ramp = (time_axis >= reverse_ramp_start) & (time_axis <= reverse_ramp_end)
+    if np.any(mask_ramp):
+        ramp_width = reverse_ramp_end - reverse_ramp_start
+        linear_progress = (time_axis[mask_ramp] - reverse_ramp_start) / ramp_width
+        # Smooth S-curve for natural ramp-up
         cosine_progress = 0.5 * (1.0 - np.cos(np.pi * linear_progress))
-        early_weight[mask_crossfade] = 1.0 - cosine_progress
-        late_weight[mask_crossfade] = cosine_progress
+        reverse_weight[mask_ramp] = cosine_progress
     
-    # Apply weighting with detailed debugging
+    # ADDITIVE COMBINATION: Forward + (Reverse * weight)
     ir_combined = np.zeros_like(ir_early)
     
-    # Debug: Check individual tracer energies before blending
+    # Debug: Check individual tracer energies before combination
     early_max = np.max(np.abs(ir_early))
     late_max = np.max(np.abs(ir_late_scaled))
     print(f"  DEBUG: Forward max energy: {early_max:.6f}")
     print(f"  DEBUG: Reverse max energy (scaled): {late_max:.6f}")
     
     for ch in range(ir_early.shape[0]):
-        ir_combined[ch, :] = (ir_early[ch, :] * early_weight + 
-                              ir_late_scaled[ch, :] * late_weight)
+        # ADDITIVE BLEND: Keep all Forward + add weighted Reverse
+        ir_combined[ch, :] = (ir_early[ch, :] * forward_weight + 
+                              ir_late_scaled[ch, :] * reverse_weight)
     
     combined_max_before = np.max(np.abs(ir_combined))
     print(f"  DEBUG: Combined max energy before norm: {combined_max_before:.6f}")
     
-    # GENTLE normalization - only if really needed
-    target_max = 0.5  # Less aggressive normalization (was 0.1)
+    # GENTLE normalization for additive blend - only if really needed
+    target_max = 0.7  # Higher threshold for additive (allows more dynamic range)
     if combined_max_before > target_max:
         normalization_factor = target_max / combined_max_before
         ir_combined *= normalization_factor
@@ -940,6 +939,7 @@ def _blend_early_late(ir_early: np.ndarray, ir_late: np.ndarray, config: RayTrac
     
     print(f"  DEBUG: Energy distribution - Early: {early_energy:.6f}, Mid: {mid_energy:.6f}, Late: {late_energy:.6f}")
     
-    print(f"  Smooth crossfade: {crossfade_start*1000:.0f}-{crossfade_end*1000:.0f}ms ({crossfade_width*1000:.0f}ms width)")
+    print(f"  ADDITIVE blend: Forward 100% + Reverse ramp {reverse_ramp_start*1000:.0f}-{reverse_ramp_end*1000:.0f}ms")
+    print(f"  ✨ Preserves discrete echoes while adding diffuse reverb!")
     
     return ir_combined
