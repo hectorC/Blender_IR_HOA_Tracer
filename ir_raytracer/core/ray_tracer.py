@@ -962,124 +962,140 @@ def _trace_hybrid(config: RayTracingConfig, source: mathutils.Vector, receiver: 
 
 
 def _blend_early_late(ir_early: np.ndarray, ir_late: np.ndarray, config: RayTracingConfig) -> np.ndarray:
-    """Blend early and late contributions using ENERGY-CONSERVING CROSSFADE."""
-    
-    # ENERGY-CONSERVING CROSSFADE: Forward fades as Reverse builds up
-    # This prevents energy doubling while preserving user control over balance
-    
-    # Create time-based weighting functions
+    """Hybrid blend: adaptive forward tail + dynamic reverse scaling (Option B)."""
+
     samples = ir_early.shape[1]
-    time_axis = np.arange(samples) / config.sample_rate
-    
-    # ENERGY SCALING for crossfade combination
-    early_peak_region = slice(0, int(0.15 * config.sample_rate))  # 0-150ms
-    late_peak_region = slice(int(0.1 * config.sample_rate), int(0.4 * config.sample_rate))  # 100-400ms
-    
-    early_rms = np.sqrt(np.mean(ir_early[:, early_peak_region] ** 2))
-    late_rms = np.sqrt(np.mean(ir_late[:, late_peak_region] ** 2))
-    
-    # Scale Reverse to complement Forward in crossfade
-    if late_rms > 0 and early_rms > 0:
-        # More conservative scaling for crossfade to prevent over-contribution
-        crossfade_scale_factor = (early_rms / late_rms) * 0.4  # Reduced from 0.6 for crossfade
-        ir_late_scaled = ir_late * crossfade_scale_factor
-        print(f"  DEBUG: Crossfade scaling - Forward RMS: {early_rms:.6f}, Reverse RMS: {late_rms:.6f}")
-        print(f"  DEBUG: Reverse scaled by: {crossfade_scale_factor:.6f} (for crossfade blend)")
+    sr = config.sample_rate
+    time_axis = np.arange(samples) / sr
+
+    # --- 1. Determine ramp window ---
+    ramp_start = 0.05  # fixed 50ms onset for reverse participation
+    ramp_end = config.hybrid_reverb_ramp_time  # user parameter (0.05-0.5 s)
+    if ramp_end <= ramp_start:
+        ramp_end = ramp_start + 0.02  # safety
+
+    # --- 2. Compute overlap RMS for dynamic reverse scaling ---
+    overlap_start_sample = int(ramp_start * sr)
+    overlap_end_sample = int(min(ramp_end + 0.25, samples / sr) * sr)
+    overlap_slice = slice(overlap_start_sample, overlap_end_sample)
+
+    def safe_rms(x: np.ndarray) -> float:
+        if x.size == 0:
+            return 0.0
+        return float(np.sqrt(np.mean(x ** 2)))
+
+    fwd_rms_overlap = safe_rms(ir_early[:, overlap_slice])
+    rev_rms_overlap = safe_rms(ir_late[:, overlap_slice])
+
+    target_ratio = 0.9  # aim reverse slightly below forward during overlap
+    if rev_rms_overlap > 0.0 and fwd_rms_overlap > 0.0:
+        reverse_scale = (fwd_rms_overlap / rev_rms_overlap) * target_ratio
     else:
-        ir_late_scaled = ir_late * 0.3  # More conservative default for crossfade
-        print(f"  DEBUG: Using conservative Reverse scaling: 0.3 (for crossfade)")
-    
-    # CROSSFADE WEIGHTING: Forward fades as Reverse builds (weights sum to ~1.0)
-    reverse_ramp_start = 0.05   # 50ms - start crossfade
-    reverse_ramp_end = config.hybrid_reverb_ramp_time  # USER CONTROL: 0.05s - 0.5s
-    
-    # Initialize weights
-    forward_weight = np.ones_like(time_axis)
+        reverse_scale = 0.3
+    reverse_scale = float(np.clip(reverse_scale, 0.2, 2.0))
+    ir_late_scaled = ir_late * reverse_scale
+    print(f"  DEBUG: Overlap RMS - Fwd: {fwd_rms_overlap:.6e}, Rev: {rev_rms_overlap:.6e}, RevScale: {reverse_scale:.3f}")
+
+    # --- 3. Estimate RT60 (fallback if not measurable) for adaptive forward tail ---
+    # Rough early slope: use 0.1-0.4 s window if energy present
+    def estimate_rt60(ir: np.ndarray) -> float:
+        win_a = int(0.1 * sr)
+        win_b = int(min(0.4, samples / sr - 0.01) * sr)
+        mono = np.mean(ir, axis=0)
+        seg = mono[win_a:win_b]
+        if seg.size < sr * 0.05:
+            return 1.0
+        eps = 1e-12
+        env = np.sqrt(np.convolve(seg**2, np.ones(512)/512, mode='same') + eps)
+        db = 20 * np.log10(np.maximum(env, eps))
+        t_local = np.linspace(0, (seg.size-1)/sr, seg.size)
+        # simple linear fit
+        A = np.vstack([t_local, np.ones_like(t_local)]).T
+        try:
+            m, c = np.linalg.lstsq(A, db, rcond=None)[0]
+            if m >= -1e-3:  # slope not negative => fallback
+                return 1.0
+            rt60_est = -60.0 / m
+            return float(np.clip(rt60_est, 0.3, 6.0))
+        except Exception:
+            return 1.0
+
+    rt60_guess = estimate_rt60(ir_late_scaled)
+    tau_f = 0.5 * rt60_guess  # forward residual decay constant
+    tail_floor = 0.12  # lowered minimum persistent forward share (pre late-release)
+
+    # --- 4. Build base forward weight (piecewise + exponential tail) ---
+    forward_weight = np.zeros_like(time_axis)
     reverse_weight = np.zeros_like(time_axis)
-    
-    # Before crossfade: 100% Forward, 0% Reverse
-    mask_early = time_axis < reverse_ramp_start
-    forward_weight[mask_early] = 1.0
-    reverse_weight[mask_early] = 0.0
-    
-    # After crossfade: Balanced blend (Forward still significant for tunnel echoes)
-    mask_late = time_axis > reverse_ramp_end
-    forward_late_weight = 0.3  # Keep 30% forward for discrete late reflections
-    reverse_late_weight = 0.7  # 70% reverse for diffuse reverb
-    forward_weight[mask_late] = forward_late_weight
-    reverse_weight[mask_late] = reverse_late_weight
-    
-    # During crossfade: Smooth transition ensuring energy conservation
-    mask_ramp = (time_axis >= reverse_ramp_start) & (time_axis <= reverse_ramp_end)
-    if np.any(mask_ramp):
-        ramp_width = reverse_ramp_end - reverse_ramp_start
-        if ramp_width > 0:  # Prevent division by zero
-            linear_progress = (time_axis[mask_ramp] - reverse_ramp_start) / ramp_width
-            # Smooth S-curve for natural transition
-            cosine_progress = 0.5 * (1.0 - np.cos(np.pi * linear_progress))
-            
-            # Crossfade: Forward fades as Reverse builds
-            forward_weight[mask_ramp] = 1.0 - (1.0 - forward_late_weight) * cosine_progress
-            reverse_weight[mask_ramp] = reverse_late_weight * cosine_progress
-        else:
-            # Instant transition if ramp_time = 0.05s
-            forward_weight[mask_ramp] = forward_late_weight
-            reverse_weight[mask_ramp] = reverse_late_weight
-    
-    # Verify energy conservation (total should be ~1.0)
+
+    # Early: 100% forward
+    early_mask = time_axis < ramp_start
+    forward_weight[early_mask] = 1.0
+
+    # Ramp region
+    ramp_mask = (time_axis >= ramp_start) & (time_axis <= ramp_end)
+    if np.any(ramp_mask):
+        ramp_width = ramp_end - ramp_start
+        prog = (time_axis[ramp_mask] - ramp_start) / max(ramp_width, 1e-6)
+        # cosine easing from 1.0 -> w_at_ramp_end (not directly to floor)
+        w_ramp_end = 0.35  # a bit higher than final floor to allow graceful exponential
+        smooth = 0.5 * (1 - np.cos(np.pi * prog))
+        forward_weight[ramp_mask] = 1.0 - (1.0 - w_ramp_end) * smooth
+
+    # Post-ramp exponential tail (primary decay toward tail_floor)
+    tail_mask = time_axis > ramp_end
+    if np.any(tail_mask):
+        t_tail = time_axis[tail_mask] - ramp_end
+        w_at_ramp_end = forward_weight[np.searchsorted(time_axis, ramp_end, side='right') - 1]
+        forward_weight[tail_mask] = tail_floor + (w_at_ramp_end - tail_floor) * np.exp(-t_tail / max(tau_f, 1e-6))
+
+    # Late forward release: further reduce residual forward energy deep in tail
+    late_release_start = ramp_end + 0.8  # seconds after which residual forward share is relaxed further
+    late_floor_min = 0.05                # ultimate late forward floor
+    tau_rel = 0.25 * rt60_guess          # faster release constant
+    late_mask = time_axis > late_release_start
+    if np.any(late_mask):
+        t_rel = time_axis[late_mask] - late_release_start
+        current = forward_weight[late_mask]
+        forward_weight[late_mask] = late_floor_min + (current - late_floor_min) * np.exp(-t_rel / max(tau_rel, 1e-6))
+        print(f"  DEBUG: Late forward release applied (start={late_release_start:.2f}s, final_floor={late_floor_min:.2f})")
+
+    # Reverse weight is complementary (not forced perfectly complementary early for slight energy freedom)
+    reverse_weight = 1.0 - forward_weight
+    # Keep a minimum reverse presence after ramp to avoid zero-diffuse pockets
+    reverse_weight[tail_mask] = np.maximum(reverse_weight[tail_mask], 0.65)
+
+    # Normalize if combined exceeds 1.05 (safety)
     total_weight = forward_weight + reverse_weight
-    max_total = np.max(total_weight)
-    min_total = np.min(total_weight)
-    avg_total = np.mean(total_weight)
-    print(f"  DEBUG: Energy conservation check - Min: {min_total:.3f}, Max: {max_total:.3f}, Avg: {avg_total:.3f}")
-    
-    # CROSSFADE COMBINATION with USER GAIN CONTROLS
+    excess_mask = total_weight > 1.05
+    if np.any(excess_mask):
+        forward_weight[excess_mask] /= total_weight[excess_mask]
+        reverse_weight[excess_mask] /= total_weight[excess_mask]
+        print("  DEBUG: Weight normalization applied to prevent >1.05 sum")
+
+    print(f"  DEBUG: Weights - fwd_tail_mean={np.mean(forward_weight[tail_mask]) if np.any(tail_mask) else 0:.3f}, rt60_guess={rt60_guess:.2f}, tau_f={tau_f:.2f}")
+
+    # --- 5. Combine with user gains ---
     ir_combined = np.zeros_like(ir_early)
-    
-    # Debug: Check individual tracer energies before combination
-    early_max = np.max(np.abs(ir_early))
-    late_max = np.max(np.abs(ir_late_scaled))
-    print(f"  DEBUG: Forward max energy: {early_max:.6f}")
-    print(f"  DEBUG: Reverse max energy (scaled): {late_max:.6f}")
-    print(f"  DEBUG: User gains - Forward: {config.hybrid_forward_gain_db:.1f}dB ({config.hybrid_forward_gain_linear:.3f}x)")
-    print(f"  DEBUG: User gains - Reverse: {config.hybrid_reverse_gain_db:.1f}dB ({config.hybrid_reverse_gain_linear:.3f}x)")
-    print(f"  DEBUG: Reverb ramp time: {config.hybrid_reverb_ramp_time:.3f}s")
-    
     for ch in range(ir_early.shape[0]):
-        # ENERGY-CONSERVING CROSSFADE with USER GAIN CONTROLS:
-        # Forward: Fades from 100% to 30% + user gain control
-        # Reverse: Builds from 0% to 70% + user gain control  
-        ir_combined[ch, :] = (ir_early[ch, :] * forward_weight * config.hybrid_forward_gain_linear + 
-                              ir_late_scaled[ch, :] * reverse_weight * config.hybrid_reverse_gain_linear)
-    
-    combined_max_before = np.max(np.abs(ir_combined))
-    print(f"  DEBUG: Combined max energy before norm: {combined_max_before:.6f}")
-    
-    # MINIMAL normalization for crossfade - should rarely be needed
-    target_max = 0.8  # Conservative threshold
-    if combined_max_before > target_max:
-        normalization_factor = target_max / combined_max_before
-        ir_combined *= normalization_factor
-        combined_max_after = np.max(np.abs(ir_combined))
-        print(f"  DEBUG: Applied normalization: {combined_max_before:.6f} → {combined_max_after:.6f} (factor: {normalization_factor:.6f})")
-    else:
-        print(f"  DEBUG: No normalization needed")
-    
-    # Debug: Check energy distribution over time
-    sample_rate = getattr(config, 'sample_rate', 48000)
-    early_samples = int(0.1 * sample_rate)  # First 100ms
-    mid_samples = int(0.5 * sample_rate)    # Up to 500ms
-    
-    early_energy = np.sum(ir_combined[:, :early_samples] ** 2)
-    mid_energy = np.sum(ir_combined[:, early_samples:mid_samples] ** 2) 
-    late_energy = np.sum(ir_combined[:, mid_samples:] ** 2)
-    
-    print(f"  DEBUG: Energy distribution - Early: {early_energy:.6f}, Mid: {mid_energy:.6f}, Late: {late_energy:.6f}")
-    
-    print(f"  🎛️  ENERGY-CONSERVING CROSSFADE blend:")
-    print(f"    Forward gain: {config.hybrid_forward_gain_db:+.1f}dB | Reverse gain: {config.hybrid_reverse_gain_db:+.1f}dB")
-    print(f"    Reverb ramp: {reverse_ramp_start*1000:.0f}-{reverse_ramp_end*1000:.0f}ms")
-    print(f"    Late field: {forward_late_weight*100:.0f}% Forward + {reverse_late_weight*100:.0f}% Reverse")
-    print(f"    ✨ Preserves tunnel echoes while preventing energy doubling!")
-    
+        ir_combined[ch, :] = (
+            ir_early[ch, :] * forward_weight * config.hybrid_forward_gain_linear +
+            ir_late_scaled[ch, :] * reverse_weight * config.hybrid_reverse_gain_linear
+        )
+
+    # --- 6. Diagnostics & gentle ceiling ---
+    peak_before = float(np.max(np.abs(ir_combined)))
+    if peak_before > 0.9:
+        scale = 0.9 / peak_before
+        ir_combined *= scale
+        print(f"  DEBUG: Output scaled {scale:.3f} to keep headroom")
+
+    # Basic energy distribution logging
+    early_samp = int(0.1 * sr)
+    mid_samp = int(0.5 * sr)
+    e_early = float(np.sum(ir_combined[:, :early_samp] ** 2))
+    e_mid = float(np.sum(ir_combined[:, early_samp:mid_samp] ** 2))
+    e_late = float(np.sum(ir_combined[:, mid_samp:] ** 2))
+    print(f"  DEBUG: Energy blocks - early={e_early:.3e} mid={e_mid:.3e} late={e_late:.3e}")
+
     return ir_combined
