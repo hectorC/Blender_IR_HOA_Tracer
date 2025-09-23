@@ -536,6 +536,39 @@ class ReverseRayTracer(ImpulseResponseRenderer):
         
         print(f"DEBUG: ReverseRayTracer starting with {num_dirs} directions")
         
+        # DEBUG: Print all configuration settings
+        print("DEBUG: RAY TRACING CONFIGURATION:")
+        print(f"  Basic Parameters:")
+        print(f"    Number of rays: {self.config.num_rays}")
+        print(f"    Max bounces: {self.config.max_bounces}")
+        print(f"    Sample rate: {self.config.sample_rate} Hz")
+        print(f"    IR length: {self.config.ir_length_samples} samples ({self.config.ir_length_samples/self.config.sample_rate:.2f}s)")
+        print(f"  Physical Parameters:")
+        print(f"    Speed of sound: {self.config.speed_of_sound:.1f} m/s")
+        print(f"    Unit scale: {self.config.unit_scale:.6f}")
+        print(f"    Receiver radius: {self.config.receiver_radius_m:.4f}m (scaled: {self.config.receiver_radius:.6f})")
+        print(f"  Ray Tracing Behavior:")
+        print(f"    Angle tolerance: {self.config.angle_tolerance_rad*180/pi:.1f}°")
+        print(f"    Specular roughness: {self.config.specular_roughness_rad*180/pi:.1f}°")
+        print(f"    Segment capture: {self.config.segment_capture}")
+        print(f"    Min throughput: {self.config.min_throughput:.0e}")
+        print(f"  Russian Roulette:")
+        print(f"    Enabled: {self.config.rr_enable}")
+        print(f"    Start bounce: {self.config.rr_start_bounce}")
+        print(f"    Survive probability: {self.config.rr_survive_prob:.3f}")
+        print(f"  Air Absorption:")
+        print(f"    Enabled: {self.config.air_enable}")
+        print(f"    Temperature: {self.config.air_temp_c:.1f}°C")
+        print(f"    Humidity: {self.config.air_humidity:.1f}%")
+        print(f"    Pressure: {self.config.air_pressure_kpa:.1f} kPa")
+        print(f"  Advanced Settings:")
+        print(f"    Quick broadband: {self.config.quick_broadband}")
+        if hasattr(self.config, 'hybrid_forward_gain_db'):
+            print(f"    Hybrid forward gain: {self.config.hybrid_forward_gain_db:.1f} dB")
+        print("DEBUG: End configuration")
+        print()
+        print(f"DEBUG: This is REVERSE ray tracing - should have strong absorption for carpet!")
+        
         total_connections = 0
         rays_traced = 0
         for d in directions:
@@ -545,21 +578,33 @@ class ReverseRayTracer(ImpulseResponseRenderer):
                                  band_one, incoming_direction)
             rays_traced += 1
         
-        # SIMPLIFIED: Much gentler normalization approach
-        # The issue: aggressive normalization is killing late energy
+        # ADAPTIVE normalization based on material properties and connection count
         if num_dirs > 0:
             ir_max_before = np.max(np.abs(self.ir))
             
-            # Check if we're likely in hybrid mode (fewer rays)
-            if num_dirs < 6000:  # Likely hybrid mode (half of typical 8192)
+            # Check if we have highly absorptive materials (like carpet) with many connections
+            needs_normalization = False
+            normalization_factor = 1.0
+            
+            if hasattr(self, 'connection_count') and self.connection_count > 100000:
+                # Many connections detected - likely over-contributing energy
+                needs_normalization = True
+                # Much gentler normalization now that material absorption is working properly
+                base_factor = min(20.0, self.connection_count / 10000.0)  # Gentler scaling
+                normalization_factor = 1.0 / base_factor
+                mode_reason = f"HIGH-CONNECTIONS ({self.connection_count})"
+                
+            elif num_dirs < 6000:  # Likely hybrid mode (half of typical 8192)
                 # GENTLE normalization for hybrid compatibility - preserve most energy
-                self.ir /= 50.0  # Much gentler than /1000
-                norm_factor = 1.0/50.0
-                print(f"DEBUG: HYBRID-mode IR normalization - Before: {ir_max_before:.2e}, Factor: {norm_factor:.2e}")
+                needs_normalization = True
+                normalization_factor = 1.0/50.0  # Much gentler than /1000
+                mode_reason = "HYBRID-mode"
+            
+            if needs_normalization:
+                self.ir *= normalization_factor
+                print(f"DEBUG: {mode_reason} IR normalization - Before: {ir_max_before:.2e}, Factor: {normalization_factor:.2e}")
             else:
-                # Standalone mode: no normalization (preserve RT60)
-                norm_factor = 1.0
-                print(f"DEBUG: STANDALONE-mode IR (no normalization) - Before: {ir_max_before:.2e}, Factor: {norm_factor:.2e}")
+                print(f"DEBUG: STANDALONE-mode IR (no normalization) - Before: {ir_max_before:.2e}, Factor: 1.00e+00")
             
             ir_max_after = np.max(np.abs(self.ir))
             print(f"DEBUG: IR normalization result - After: {ir_max_after:.2e}")
@@ -571,6 +616,15 @@ class ReverseRayTracer(ImpulseResponseRenderer):
         print(f"DEBUG: Reverse tracer completed {rays_traced} rays")
         if hasattr(self, 'connection_count'):
             print(f"DEBUG: Total successful connections: {self.connection_count}")
+            
+            # DEBUG: Print final bounce statistics
+            if hasattr(self, 'bounce_stats'):
+                print(f"DEBUG: Final bounce distribution:")
+                total_attempts = sum(self.bounce_stats.values())
+                for b in sorted(self.bounce_stats.keys()):
+                    percentage = (self.bounce_stats[b] / total_attempts) * 100
+                    print(f"  Bounce {b}: {self.bounce_stats[b]} attempts ({percentage:.1f}%)")
+                print(f"DEBUG: Average bounces per ray: {sum(b*count for b,count in self.bounce_stats.items()) / total_attempts:.1f}")
         
         return self.ir
     
@@ -579,6 +633,7 @@ class ReverseRayTracer(ImpulseResponseRenderer):
                          initial_throughput: np.ndarray, incoming_direction: mathutils.Vector):
         """Trace a single reverse ray from receiver toward room, checking for source connections."""
         import random
+        from ..utils.math_utils import jitter_direction, reflect, cosine_weighted_hemisphere
         
         pos = start_pos
         dirn = direction
@@ -591,6 +646,13 @@ class ReverseRayTracer(ImpulseResponseRenderer):
         connections_made = 0
         
         while bounce < self.config.max_bounces:
+            # DEBUG: Track bounce statistics
+            if not hasattr(self, 'bounce_stats'):
+                self.bounce_stats = {}
+            if bounce not in self.bounce_stats:
+                self.bounce_stats[bounce] = 0
+            self.bounce_stats[bounce] += 1
+            
             # Cast ray to find next surface hit
             hit, hit_point, normal, face_index = self._cast_ray(pos, dirn, bvh)
             
@@ -605,6 +667,18 @@ class ReverseRayTracer(ImpulseResponseRenderer):
             # Get material properties
             material = self._get_material_properties(face_index, obj_map)
             
+            # DEBUG: Print material properties for early bounces
+            if bounce < 3 and random.random() < 0.001:  # Debug 0.1% of early bounces
+                print(f"DEBUG Material bounce {bounce}:")
+                print(f"  Absorption: {material.absorption_spectrum}")
+                print(f"  Scatter: {material.scatter_spectrum}")  
+                print(f"  Reflection: {material.reflection_spectrum}")
+                print(f"  Diffuse ampl: {material.diffuse_amplitude}")
+                print(f"  Specular ampl: {material.specular_amplitude}")
+                avg_abs = np.mean(material.absorption_spectrum)
+                avg_refl_ampl = np.mean(material.reflection_amplitude)
+                print(f"  Avg absorption: {avg_abs:.3f}, Avg refl_ampl: {avg_refl_ampl:.3f}")
+            
             # Apply air absorption
             if self.config.air_enable:
                 throughput *= self._calculate_air_absorption(seg_length)
@@ -613,23 +687,42 @@ class ReverseRayTracer(ImpulseResponseRenderer):
             self._check_source_connection(hit_point, normal, target, throughput, 
                                         material, path_length, bvh, incoming_direction, bounce)
             
-            # Apply surface absorption
-            throughput *= material.reflection_amplitude  # Use reflection amplitude, not (1 - absorption)
+            # CRITICAL FIX: Choose between specular and diffuse bounce based on scatter_spectrum
+            # Average scatter value determines the probability of diffuse vs specular bounce
+            avg_scatter = float(np.mean(material.scatter_spectrum))
             
-            # Check if energy is too low to continue
+            # ADDITIONAL FIX: More aggressive absorption for highly absorptive materials
+            avg_absorption = float(np.mean(material.absorption_spectrum))
+            
+            if random.random() < avg_scatter:
+                # Diffuse bounce - use diffuse_amplitude and cosine-weighted direction
+                throughput *= material.diffuse_amplitude
+                new_direction = cosine_weighted_hemisphere(normal)
+                
+                # NO EXTRA DAMPING - Test basic material absorption fix only
+                if bounce < 2 and random.random() < 0.001:
+                    print(f"DEBUG: Basic diffuse - abs: {avg_absorption:.3f}, diffuse_amp: {np.mean(material.diffuse_amplitude):.6f}, throughput: {np.max(throughput):.2e}")
+                        
+            else:
+                # Specular bounce - use specular_amplitude and reflect with roughness
+                throughput *= material.specular_amplitude
+                reflected = reflect(dirn, normal)
+                new_direction = jitter_direction(reflected, self.config.specular_roughness_rad)
+                
+                # NO EXTRA DAMPING - Test basic material absorption fix only
+                if bounce < 2 and random.random() < 0.001:
+                    print(f"DEBUG: Basic specular - abs: {avg_absorption:.3f}, specular_amp: {np.mean(material.specular_amplitude):.6f}, throughput: {np.max(throughput):.2e}")
+            
+            # Standard energy threshold check - no special treatment for absorptive materials
             if np.max(throughput) < self.config.min_throughput:
+                if bounce < 2 and random.random() < 0.001:
+                    print(f"DEBUG: Standard ray termination - energy: {np.max(throughput):.2e}, threshold: {self.config.min_throughput:.2e}")
                 break
                 
-            # Russian roulette termination with energy compensation
-            should_terminate, throughput = self._apply_russian_roulette(bounce, throughput)
-            if should_terminate:
-                break
-            
-            # Sample new direction based on material BRDF
-            new_direction = self._sample_brdf_direction(normal, -dirn, material, 
-                                                      random.random(), random.random())
-            if new_direction is None:
-                break
+            # Russian roulette termination with energy compensation - TEMPORARILY DISABLED
+            # should_terminate, throughput = self._apply_russian_roulette(bounce, throughput)
+            # if should_terminate:
+            #     break
                 
             # Update for next iteration
             pos = hit_point + normal * self.config.eps + new_direction * (self.config.eps * 0.5)
@@ -695,25 +788,62 @@ class ReverseRayTracer(ImpulseResponseRenderer):
         
         final_throughput *= brdf_weight * monte_carlo_weight
         
-        # Additional normalization based on bounce count to prevent accumulation
-        # Later bounces should contribute less (geometric decay)
-        bounce_weight = 1.0 / (1.0 + bounce * 0.5)  # Decay with bounce count
-        final_throughput *= bounce_weight
-        
-        # Scale by distance to further reduce over-contribution from distant connections
-        distance_weight = 1.0 / max(1.0, distance_to_source * 0.1)
-        final_throughput *= distance_weight
+        # REMOVED AGGRESSIVE PENALTIES - Let material absorption do the work
+        # No extra bounce penalties - material absorption already handles energy decay
+        # No distance penalties - geometric spreading already handled in ray tracing
         
         final_energy = np.mean(final_throughput)
+        
+        # DEBUG: Track energy flow step by step
+        debug_energy_flow = bounce <= 2 and random.random() < 0.005  # 0.5% of early bounces
+        
+        if debug_energy_flow:
+            print(f"DEBUG ENERGY FLOW bounce {bounce}:")
+            print(f"  1. Initial throughput: {np.mean(throughput):.4f}")
+        
+        # Apply BRDF weighting
+        brdf_weight = self._evaluate_brdf(normal, incoming_direction, source_direction, material)
+        
+        if debug_energy_flow:
+            print(f"  2. BRDF weight: {brdf_weight:.4f}")
+        
+        # Monte Carlo correction (solid angle sampling)
+        # For surface reflections, use hemisphere solid angle (2π), not full sphere (4π)
+        monte_carlo_weight = abs(source_direction.dot(normal)) / (2.0 * pi)
+        
+        if debug_energy_flow:
+            print(f"  3. Monte Carlo weight: {monte_carlo_weight:.4f}")
+            print(f"  4. Material diffuse_amp: {np.mean(material.diffuse_amplitude):.4f}")
+            print(f"  5. Material specular_amp: {np.mean(material.specular_amplitude):.4f}")
+        
+        final_throughput = throughput.copy()
+        final_throughput *= brdf_weight * monte_carlo_weight
+        
+        final_energy = np.mean(final_throughput)
+        
+        if debug_energy_flow:
+            print(f"  6. Final energy: {final_energy:.4f}")
+            print(f"  7. Total reduction factor: {(final_energy/initial_energy if initial_energy > 0 else 0):.4f}")
+            print(f"  8. Should this contribute significantly? {final_energy > 0.001}")
         
         # DEBUG: Log energy reduction for early connections
         if debug_early_connections or (bounce <= 1 and random.random() < 0.001):
             print(f"DEBUG: Energy chain bounce {bounce}: {initial_energy:.2e} → {final_energy:.2e}")
-            print(f"DEBUG: BRDF: {brdf_weight:.3f}, MC: {monte_carlo_weight:.3f}, Bounce: {bounce_weight:.3f}, Dist: {distance_weight:.3f}")
+            print(f"DEBUG: BRDF: {brdf_weight:.3f}, MC: {monte_carlo_weight:.3f}, Material absorption handles the rest")
             print(f"DEBUG: Total reduction: {(final_energy/initial_energy if initial_energy > 0 else 0):.2e}")
         
         # Emit impulse response contribution
-        if self.emit_impulse(final_throughput, total_distance, source_direction, 1.0):
+        emission_success = self.emit_impulse(final_throughput, total_distance, source_direction, 1.0)
+        
+        if debug_energy_flow:
+            print(f"  9. Emission success: {emission_success}")
+            print(f"  10. Total distance: {total_distance:.2f}m")
+            if emission_success:
+                print(f"  11. ✓ CONTRIBUTION ADDED TO IR")
+            else:
+                print(f"  11. ✗ CONTRIBUTION REJECTED (energy too low?)")
+        
+        if emission_success:
             if not hasattr(self, 'connection_count'):
                 self.connection_count = 0
             self.connection_count += 1
@@ -722,60 +852,29 @@ class ReverseRayTracer(ImpulseResponseRenderer):
     def _evaluate_brdf(self, normal: mathutils.Vector, incoming: mathutils.Vector, 
                       outgoing: mathutils.Vector, material: MaterialProperties) -> float:
         """Evaluate BRDF for reflection from incoming to outgoing direction."""
-        # Simplified Lambert + specular BRDF model
         cos_in = abs(incoming.dot(normal))
         cos_out = abs(outgoing.dot(normal))
         
         if cos_in <= 0.0 or cos_out <= 0.0:
             return 0.0
             
-        # Lambertian diffuse component
-        diffuse = cos_out / pi
+        # Use material amplitude directly - no extra normalization needed
+        # The ray scattering already applied diffuse_amplitude/specular_amplitude
+        avg_scatter = float(np.mean(material.scatter_spectrum))
+        avg_diffuse_amp = float(np.mean(material.diffuse_amplitude))
+        avg_specular_amp = float(np.mean(material.specular_amplitude))
         
-        # Simple specular component (Phong-like)
+        # Lambertian diffuse component - properly normalized
+        diffuse = avg_diffuse_amp * cos_out
+        
+        # Specular component with realistic strength  
         reflect_dir = incoming - 2.0 * incoming.dot(normal) * normal
         specular_factor = max(0.0, reflect_dir.dot(outgoing))
-        # Use average scatter as roughness indicator
-        avg_scatter = float(np.mean(material.scatter_spectrum))
-        specular = pow(specular_factor, max(1.0, 1.0 / max(avg_scatter, 0.01)))
+        roughness = max(0.01, avg_scatter)
+        specular = avg_specular_amp * pow(specular_factor, 1.0 / roughness)
         
-        # Combine diffuse and specular (simplified mixing)
-        return diffuse * avg_scatter + specular * (1.0 - avg_scatter) * 0.1
-    
-    def _sample_brdf_direction(self, normal: mathutils.Vector, incoming: mathutils.Vector,
-                              material: MaterialProperties, r1: float, r2: float) -> Optional[mathutils.Vector]:
-        """Sample a new direction based on BRDF."""
-        import math
-        
-        # Simple cosine-weighted hemisphere sampling for diffuse
-        # Convert to local coordinate system where normal is (0,0,1)
-        
-        # Create orthonormal basis
-        if abs(normal.z) < 0.999:
-            tangent = mathutils.Vector((normal.y, -normal.x, 0.0)).normalized()
-        else:
-            tangent = mathutils.Vector((1.0, 0.0, 0.0))
-        bitangent = normal.cross(tangent)
-        
-        # Cosine-weighted hemisphere sampling
-        cos_theta = math.sqrt(r1)
-        sin_theta = math.sqrt(1.0 - r1)
-        phi = 2.0 * math.pi * r2
-        
-        # Local direction
-        local_dir = mathutils.Vector((
-            sin_theta * math.cos(phi),
-            sin_theta * math.sin(phi), 
-            cos_theta
-        ))
-        
-        # Transform to world coordinates
-        world_dir = (local_dir.x * tangent + 
-                    local_dir.y * bitangent + 
-                    local_dir.z * normal)
-        
-        return world_dir.normalized()
-    
+        # Mix based on scatter probability (higher scatter = more diffuse)
+        return diffuse * avg_scatter + specular * (1.0 - avg_scatter)
     
     def _add_direct_path(self, source: mathutils.Vector, receiver: mathutils.Vector,
                         bvh, throughput: np.ndarray):

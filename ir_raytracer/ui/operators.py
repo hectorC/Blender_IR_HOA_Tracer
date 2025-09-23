@@ -295,17 +295,32 @@ class AIRT_OT_CopyMaterial(bpy.types.Operator):
             self.report({'WARNING'}, "Need to select target objects")
             return {'CANCELLED'}
         
-        # Copy properties
+        # Copy properties with error handling
+        copied_count = 0
         for target_obj in target_objects:
-            target_obj.absorption = source_obj.absorption
-            target_obj.scatter = source_obj.scatter
-            target_obj.transmission = source_obj.transmission
-            target_obj.airt_material_preset = source_obj.airt_material_preset
-            target_obj.absorption_bands = source_obj.absorption_bands[:]
-            target_obj.scatter_bands = source_obj.scatter_bands[:]
+            try:
+                # Ensure target object has acoustic properties (they should be registered on all objects)
+                target_obj.absorption = source_obj.absorption
+                target_obj.scatter = source_obj.scatter
+                target_obj.transmission = source_obj.transmission
+                target_obj.airt_material_preset = source_obj.airt_material_preset
+                
+                # Copy frequency bands - ensure they exist and have correct length
+                if hasattr(source_obj, 'absorption_bands') and hasattr(target_obj, 'absorption_bands'):
+                    target_obj.absorption_bands = source_obj.absorption_bands[:]
+                if hasattr(source_obj, 'scatter_bands') and hasattr(target_obj, 'scatter_bands'):
+                    target_obj.scatter_bands = source_obj.scatter_bands[:]
+                
+                copied_count += 1
+            except AttributeError as e:
+                self.report({'WARNING'}, f"Failed to copy material to {target_obj.name}: {str(e)}")
         
-        self.report({'INFO'}, f"Copied material from {source_obj.name} to {len(target_objects)} object(s)")
-        return {'FINISHED'}
+        if copied_count > 0:
+            self.report({'INFO'}, f"Copied material from {source_obj.name} to {copied_count} object(s)")
+            return {'FINISHED'}
+        else:
+            self.report({'ERROR'}, "Failed to copy material to any objects")
+            return {'CANCELLED'}
 
 
 class AIRT_OT_DiagnoseScene(bpy.types.Operator):

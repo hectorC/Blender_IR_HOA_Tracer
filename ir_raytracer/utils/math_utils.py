@@ -168,3 +168,8 @@ def jitter_specular_direction(direction: mathutils.Vector, roughness_rad: float)
     sin_a = sqrt(max(0.0, 1.0 - cos_a * cos_a))
     
     return (v * cos_a + t * (sin_a * cos(vphi)) + b * (sin_a * sin(vphi))).normalized()
+
+
+def jitter_direction(direction: mathutils.Vector, roughness_rad: float) -> mathutils.Vector:
+    """Apply micro-roughness jitter to a direction (alias for jitter_specular_direction)."""
+    return jitter_specular_direction(direction, roughness_rad)
