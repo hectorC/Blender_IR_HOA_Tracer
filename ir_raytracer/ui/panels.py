@@ -96,7 +96,49 @@ class AIRT_PT_Panel(bpy.types.Panel):
             col.label(text="Crossfade Timing:")
             col.prop(scene, "airt_hybrid_crossfade_start_ms", text="Start Time")
             col.prop(scene, "airt_hybrid_crossfade_length_ms", text="Fade Length")
+            
+            # Final level controls - both independent
+            col.separator()
+            col.label(text="Final Levels:")
             col.prop(scene, "airt_hybrid_forward_final_level", text="Forward Final Level")
+            col.prop(scene, "airt_hybrid_reverse_final_level", text="Reverse Final Level")
+            
+            # Cache controls - Show re-mix button when cache is valid
+            col.separator()
+            
+            # Import the cache validation function
+            try:
+                from .operators import _is_cache_valid
+                cache_valid = _is_cache_valid(context)
+            except ImportError:
+                cache_valid = scene.airt_hybrid_cache_valid
+            
+            if cache_valid:
+                # Cache is valid - show re-mix controls
+                cache_box = col.box()
+                cache_box.label(text="✓ IRs Cached - Ready for Re-mixing", icon='FILE_TICK')
+                
+                # Re-mix button (large and prominent)
+                remix_row = cache_box.row()
+                remix_row.scale_y = 1.5
+                remix_row.operator("airt.remix_hybrid_ir", text="🔄 Re-mix & Export", icon='FILE_REFRESH')
+                
+                # Clear cache button (smaller, less prominent)
+                clear_row = cache_box.row()
+                clear_row.scale_y = 0.8
+                clear_row.operator("airt.clear_hybrid_cache", text="Clear Cache", icon='TRASH')
+                
+                # Show last export path if available
+                if scene.airt_hybrid_last_export_path:
+                    import os
+                    filename = os.path.basename(scene.airt_hybrid_last_export_path)
+                    cache_box.label(text=f"Last: {filename}", icon='FILE_SOUND')
+            else:
+                # No cache - show status
+                if scene.airt_hybrid_cache_valid:
+                    col.label(text="⚠️ Cache invalid (scene changed)", icon='ERROR')
+                else:
+                    col.label(text="ℹ️ No cached IRs - full trace needed", icon='INFO')
         
         layout.separator()
         

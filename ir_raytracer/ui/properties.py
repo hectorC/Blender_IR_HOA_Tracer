@@ -54,6 +54,22 @@ def _update_tracing_mode_defaults(self, context):
     elif self.airt_trace_mode == 'REVERSE':
         # Reverse tracing can work without segment capture
         pass  # Leave current setting
+    
+    # Invalidate cache when tracing mode changes (affects results)
+    _invalidate_hybrid_cache(context)
+
+
+def _invalidate_hybrid_cache(context):
+    """Invalidate hybrid IR cache when scene parameters change."""
+    if context and hasattr(context, 'scene'):
+        scene = context.scene
+        if hasattr(scene, 'airt_hybrid_cache_valid'):
+            scene.airt_hybrid_cache_valid = False
+
+
+def _update_cache_invalidating_property(self, context):
+    """Update callback for properties that should invalidate the hybrid cache."""
+    _invalidate_hybrid_cache(context)
 
 
 def _mark_material_custom(self, context):
@@ -168,7 +184,8 @@ def register_acoustic_props():
         description="Number of rays to trace per pass. More rays = better quality, slower render. 8192-16384 recommended for good quality",
         default=8192, 
         min=128, 
-        max=131072
+        max=131072,
+        update=_update_cache_invalidating_property
     )
     
     scene.airt_passes = bpy.props.IntProperty(
@@ -176,7 +193,8 @@ def register_acoustic_props():
         description="Multiple passes are averaged for smoother results. 4-8 passes recommended for final renders",
         default=4, 
         min=1, 
-        max=32
+        max=32,
+        update=_update_cache_invalidating_property
     )
     
     scene.airt_max_order = bpy.props.IntProperty(
@@ -184,7 +202,8 @@ def register_acoustic_props():
         description="Maximum ray bounces before termination. Higher values capture longer reverb tails (50-100 recommended)",
         default=64, 
         min=0, 
-        max=1000
+        max=1000,
+        update=_update_cache_invalidating_property
     )
     
     scene.airt_sr = bpy.props.IntProperty(
@@ -192,7 +211,8 @@ def register_acoustic_props():
         description="Audio sample rate for impulse response output. Higher rates preserve more high-frequency detail",
         default=48000, 
         min=8000, 
-        max=192000
+        max=192000,
+        update=_update_cache_invalidating_property
     )
     
     scene.airt_ir_seconds = bpy.props.FloatProperty(
@@ -300,6 +320,66 @@ def register_acoustic_props():
         step=100,  # 1% steps
         precision=1,
         subtype='PERCENTAGE'
+    )
+    
+    scene.airt_hybrid_reverse_final_level = bpy.props.FloatProperty(
+        name="Reverse Final Level (%)",
+        description="Final level of reverse tracer after crossfade. 100% = full reverb tail, 50% = attenuated reverb, 0% = no reverb tail",
+        default=100.0,
+        min=0.0,
+        max=100.0,
+        step=100,  # 1% steps
+        precision=1,
+        subtype='PERCENTAGE'
+    )
+    
+    # Hybrid IR cache properties for re-mixing
+    scene.airt_hybrid_cache_valid = bpy.props.BoolProperty(
+        name="Hybrid Cache Valid",
+        description="Whether cached forward and reverse IRs are available for re-mixing",
+        default=False
+    )
+    
+    scene.airt_hybrid_cache_forward_ir = bpy.props.StringProperty(
+        name="Cached Forward IR",
+        description="Base64 encoded forward IR data for re-mixing",
+        default=""
+    )
+    
+    scene.airt_hybrid_cache_reverse_ir = bpy.props.StringProperty(
+        name="Cached Reverse IR",
+        description="Base64 encoded reverse IR data for re-mixing",
+        default=""
+    )
+    
+    scene.airt_hybrid_cache_sample_rate = bpy.props.IntProperty(
+        name="Cached Sample Rate",
+        description="Sample rate of cached IRs",
+        default=0
+    )
+    
+    scene.airt_hybrid_cache_ir_length = bpy.props.IntProperty(
+        name="Cached IR Length",
+        description="Length in samples of cached IRs",
+        default=0
+    )
+    
+    scene.airt_hybrid_cache_channels = bpy.props.IntProperty(
+        name="Cached Channels",
+        description="Number of channels in cached IRs",
+        default=0
+    )
+    
+    scene.airt_hybrid_cache_scene_hash = bpy.props.StringProperty(
+        name="Cached Scene Hash",
+        description="Hash of scene parameters used to validate cache",
+        default=""
+    )
+    
+    scene.airt_hybrid_last_export_path = bpy.props.StringProperty(
+        name="Last Export Path",
+        description="Path of the last exported hybrid IR file",
+        default=""
     )
     
     # Russian roulette settings
@@ -445,7 +525,8 @@ def unregister_acoustic_props():
     scene_attrs = [
         "airt_num_rays", "airt_passes", "airt_max_order", "airt_sr", "airt_ir_seconds",
         "airt_angle_tol_deg", "airt_wav_subtype", "airt_seed", "airt_recv_radius",
-        "airt_trace_mode", "airt_hybrid_forward_gain_db", "airt_hybrid_reverse_gain_db", "airt_hybrid_crossfade_start_ms", "airt_hybrid_crossfade_length_ms", "airt_hybrid_forward_final_level",
+        "airt_trace_mode", "airt_hybrid_forward_gain_db", "airt_hybrid_reverse_gain_db", "airt_hybrid_crossfade_start_ms", "airt_hybrid_crossfade_length_ms", "airt_hybrid_forward_final_level", "airt_hybrid_reverse_final_level",
+        "airt_hybrid_cache_valid", "airt_hybrid_cache_forward_ir", "airt_hybrid_cache_reverse_ir", "airt_hybrid_cache_sample_rate", "airt_hybrid_cache_ir_length", "airt_hybrid_cache_channels", "airt_hybrid_cache_scene_hash", "airt_hybrid_last_export_path",
         "airt_rr_enable", "airt_rr_start", "airt_rr_p",
         "airt_spec_rough_deg", "airt_enable_seg_capture", "airt_enable_diffraction",
         "airt_diffraction_samples", "airt_diffraction_max_deg",

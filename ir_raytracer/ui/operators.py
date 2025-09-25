@@ -27,6 +27,132 @@ if HAVE_SF:
 else:
     sf = None
 
+# Check for required dependencies with better error handling
+HAVE_SF, SF_ERROR = check_soundfile_availability()
+if HAVE_SF:
+    import soundfile as sf
+else:
+    sf = None
+
+try:
+    from ..core.ray_tracer import trace_impulse_response
+    HAVE_TRACER = True
+except ImportError:
+    HAVE_TRACER = False
+
+# Cache management utilities
+import base64
+import hashlib
+import json
+
+def _serialize_ir_data(ir: np.ndarray) -> str:
+    """Serialize IR numpy array to base64 string for storage in Blender properties."""
+    ir_bytes = ir.tobytes()
+    return base64.b64encode(ir_bytes).decode('utf-8')
+
+def _deserialize_ir_data(data_str: str, shape: tuple, dtype=np.float32) -> np.ndarray:
+    """Deserialize base64 string back to numpy array."""
+    ir_bytes = base64.b64decode(data_str.encode('utf-8'))
+    ir = np.frombuffer(ir_bytes, dtype=dtype).reshape(shape)
+    return ir.copy()  # Ensure writable array
+
+def _compute_scene_hash(context) -> str:
+    """Compute hash of scene parameters that affect IR tracing."""
+    scene = context.scene
+    
+    # Parameters that invalidate cache when changed
+    hash_params = {
+        'num_rays': scene.airt_num_rays,
+        'passes': scene.airt_passes, 
+        'max_order': scene.airt_max_order,
+        'sr': scene.airt_sr,
+        'ir_seconds': scene.airt_ir_seconds,
+        'recv_radius': scene.airt_recv_radius,
+        'seed': scene.airt_seed,
+        'spec_rough_deg': scene.airt_spec_rough_deg,
+        'enable_seg_capture': scene.airt_enable_seg_capture,
+        'enable_diffraction': scene.airt_enable_diffraction,
+        'diffraction_samples': scene.airt_diffraction_samples,
+        'diffraction_max_deg': scene.airt_diffraction_max_deg,
+        'rr_enable': scene.airt_rr_enable,
+        'rr_start': scene.airt_rr_start,
+        'rr_p': scene.airt_rr_p,
+        'air_enable': scene.airt_air_enable,
+        'air_temp_c': scene.airt_air_temp_c,
+        'air_humidity': scene.airt_air_humidity,
+        'air_pressure_kpa': scene.airt_air_pressure_kpa,
+        'quick_broadband': scene.airt_quick_broadband,
+        'min_throughput': scene.airt_min_throughput,
+        'yaw_offset_deg': scene.airt_yaw_offset_deg,
+        'invert_z': scene.airt_invert_z,
+        'calibrate_direct': scene.airt_calibrate_direct
+    }
+    
+    # Add geometry and material information (simplified)
+    # TODO: Could add more detailed scene geometry/material hashing
+    hash_params['object_count'] = len([obj for obj in context.scene.objects if obj.type == 'MESH'])
+    
+    # Serialize and hash
+    hash_str = json.dumps(hash_params, sort_keys=True)
+    return hashlib.md5(hash_str.encode()).hexdigest()
+
+def _is_cache_valid(context) -> bool:
+    """Check if the cached IRs are valid for the current scene."""
+    scene = context.scene
+    
+    if not scene.airt_hybrid_cache_valid:
+        return False
+        
+    if not scene.airt_hybrid_cache_forward_ir or not scene.airt_hybrid_cache_reverse_ir:
+        return False
+        
+    current_hash = _compute_scene_hash(context)
+    if current_hash != scene.airt_hybrid_cache_scene_hash:
+        return False
+        
+    return True
+
+def _store_irs_in_cache(context, forward_ir: np.ndarray, reverse_ir: np.ndarray, sample_rate: int):
+    """Store processed forward and reverse IRs in cache."""
+    scene = context.scene
+    
+    # Serialize IR data
+    scene.airt_hybrid_cache_forward_ir = _serialize_ir_data(forward_ir)
+    scene.airt_hybrid_cache_reverse_ir = _serialize_ir_data(reverse_ir)
+    
+    # Store metadata
+    scene.airt_hybrid_cache_sample_rate = sample_rate
+    scene.airt_hybrid_cache_ir_length = forward_ir.shape[1]
+    scene.airt_hybrid_cache_channels = forward_ir.shape[0]
+    scene.airt_hybrid_cache_scene_hash = _compute_scene_hash(context)
+    scene.airt_hybrid_cache_valid = True
+    
+    print(f"Cached hybrid IRs: {forward_ir.shape[0]} channels, {forward_ir.shape[1]} samples at {sample_rate}Hz")
+
+def _load_irs_from_cache(context) -> tuple:
+    """Load forward and reverse IRs from cache. Returns (forward_ir, reverse_ir, sample_rate)."""
+    scene = context.scene
+    
+    if not _is_cache_valid(context):
+        return None, None, 0
+    
+    # Reconstruct IR arrays
+    shape = (scene.airt_hybrid_cache_channels, scene.airt_hybrid_cache_ir_length)
+    forward_ir = _deserialize_ir_data(scene.airt_hybrid_cache_forward_ir, shape)
+    reverse_ir = _deserialize_ir_data(scene.airt_hybrid_cache_reverse_ir, shape)
+    
+    return forward_ir, reverse_ir, scene.airt_hybrid_cache_sample_rate
+
+def _invalidate_cache(context):
+    """Invalidate the hybrid IR cache."""
+    scene = context.scene
+    scene.airt_hybrid_cache_valid = False
+    scene.airt_hybrid_cache_forward_ir = ""
+    scene.airt_hybrid_cache_reverse_ir = ""
+    scene.airt_hybrid_cache_scene_hash = ""
+    print("Hybrid IR cache invalidated")
+
+
 try:
     from ..core.ray_tracer import trace_impulse_response
     from ..utils.scene_utils import build_bvh, get_scene_sources, get_scene_receivers, get_writable_path
@@ -320,11 +446,16 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
         crossfade_start_ms = float(scene.airt_hybrid_crossfade_start_ms)
         crossfade_length_ms = float(scene.airt_hybrid_crossfade_length_ms)
         forward_final_level = float(scene.airt_hybrid_forward_final_level) / 100.0  # Convert % to 0.0-1.0
+        reverse_final_level = float(scene.airt_hybrid_reverse_final_level) / 100.0  # Convert % to 0.0-1.0
         
         # Debug reporting
-        self.report({'INFO'}, f"Crossfade: start={crossfade_start_ms}ms, length={crossfade_length_ms}ms, final_forward={forward_final_level*100:.1f}%")
+        self.report({'INFO'}, f"Crossfade: start={crossfade_start_ms}ms, length={crossfade_length_ms}ms, final_forward={forward_final_level*100:.1f}%, final_reverse={reverse_final_level*100:.1f}%")
         
-        hybrid_ir = self._crossfade_hybrid_irs(forward_ir, reverse_ir, config.sample_rate, crossfade_start_ms, crossfade_length_ms, forward_final_level)
+        hybrid_ir = self._crossfade_hybrid_irs(forward_ir, reverse_ir, config.sample_rate, crossfade_start_ms, crossfade_length_ms, forward_final_level, reverse_final_level)
+        
+        # Cache the processed forward and reverse IRs for re-mixing (before final normalization)
+        _store_irs_in_cache(context, forward_ir, reverse_ir, config.sample_rate)
+        self.report({'INFO'}, "Cached processed forward and reverse IRs for re-mixing")
         
         # Step 5: Final normalization and output (same as existing workflow)
         final_peak = np.max(np.abs(hybrid_ir))
@@ -336,8 +467,8 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
         return hybrid_ir
     
     def _crossfade_hybrid_irs(self, forward_ir: np.ndarray, reverse_ir: np.ndarray, sample_rate: int, 
-                             crossfade_start_ms: float, crossfade_length_ms: float, forward_final_level: float) -> np.ndarray:
-        """Crossfade forward and reverse IRs with user-controllable time-based weighting and final forward level."""
+                             crossfade_start_ms: float, crossfade_length_ms: float, forward_final_level: float, reverse_final_level: float) -> np.ndarray:
+        """Crossfade forward and reverse IRs with independent final level controls."""
         # Ensure both IRs have the same length
         min_length = min(forward_ir.shape[1], reverse_ir.shape[1])
         forward_ir = forward_ir[:, :min_length]
@@ -364,20 +495,20 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
         forward_weight[:crossfade_start_samples] = 1.0
         reverse_weight[:crossfade_start_samples] = 0.0
         
-        # Transition period: smooth crossfade from 100% forward to final_level% forward
+        # Transition period: independent crossfades for forward and reverse
         if crossfade_end_samples > crossfade_start_samples:
             transition_length = crossfade_end_samples - crossfade_start_samples
-            # Ramp from 1.0 down to forward_final_level (e.g., 0.0 for complete fade, 0.2 for 20% preserved)
+            # Forward: fade from 1.0 down to forward_final_level (independent)
             forward_transition = np.linspace(1.0, forward_final_level, transition_length)
-            # Reverse ramp compensates to maintain total energy (but adjusted for forward final level)
-            reverse_transition = np.linspace(0.0, 1.0 - forward_final_level, transition_length)
+            # Reverse: fade from 0.0 up to reverse_final_level (independent)
+            reverse_transition = np.linspace(0.0, reverse_final_level, transition_length)
             
             forward_weight[crossfade_start_samples:crossfade_end_samples] = forward_transition
             reverse_weight[crossfade_start_samples:crossfade_end_samples] = reverse_transition
         
-        # Late period: forward_final_level% forward, (1.0 - forward_final_level)% reverse
+        # Late period: each tracer at its independent final level
         forward_weight[crossfade_end_samples:] = forward_final_level
-        reverse_weight[crossfade_end_samples:] = 1.0 - forward_final_level
+        reverse_weight[crossfade_end_samples:] = reverse_final_level
         
         # Debug: show weight values at key sample points
         key_samples = [0, crossfade_start_samples, 
@@ -394,6 +525,147 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
                     reverse_ir * reverse_weight[None, :])
         
         return hybrid_ir
+
+
+class AIRT_OT_RemixHybridIR(bpy.types.Operator):
+    """Re-mix cached forward and reverse IRs with new crossfade parameters and export to WAV."""
+    bl_idname = "airt.remix_hybrid_ir"
+    bl_label = "Re-mix Cached IRs"
+    bl_description = "Apply new crossfade settings to cached forward and reverse IRs and export"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        """Execute the re-mix operation using cached IRs."""
+        scene = context.scene
+        
+        # Check if cache is valid
+        if not _is_cache_valid(context):
+            if not scene.airt_hybrid_cache_valid:
+                self.report({'ERROR'}, "No valid cached IRs found. Please run a full hybrid trace first.")
+            else:
+                self.report({'ERROR'}, "Cached IRs are invalid (scene has changed). Please run a full hybrid trace.")
+            return {'CANCELLED'}
+        
+        # Load cached IRs
+        self.report({'INFO'}, "Loading cached forward and reverse IRs...")
+        forward_ir, reverse_ir, sample_rate = _load_irs_from_cache(context)
+        
+        if forward_ir is None or reverse_ir is None:
+            self.report({'ERROR'}, "Failed to load cached IRs")
+            return {'CANCELLED'}
+        
+        self.report({'INFO'}, f"Loaded cached IRs: {forward_ir.shape[0]} channels, {forward_ir.shape[1]} samples at {sample_rate}Hz")
+        
+        # Get current crossfade parameters
+        crossfade_start_ms = float(scene.airt_hybrid_crossfade_start_ms)
+        crossfade_length_ms = float(scene.airt_hybrid_crossfade_length_ms)
+        forward_final_level = float(scene.airt_hybrid_forward_final_level) / 100.0  # Convert % to 0.0-1.0
+        reverse_final_level = float(scene.airt_hybrid_reverse_final_level) / 100.0  # Convert % to 0.0-1.0
+        
+        self.report({'INFO'}, f"Re-mixing with: start={crossfade_start_ms}ms, length={crossfade_length_ms}ms, final_forward={forward_final_level*100:.1f}%, final_reverse={reverse_final_level*100:.1f}%")
+        
+        # Apply crossfade with current parameters
+        hybrid_ir = self._crossfade_hybrid_irs(forward_ir, reverse_ir, sample_rate, crossfade_start_ms, crossfade_length_ms, forward_final_level, reverse_final_level)
+        
+        # Final normalization
+        final_peak = np.max(np.abs(hybrid_ir))
+        if final_peak > 1e-9:
+            final_scale = 1.0 / final_peak
+            hybrid_ir = hybrid_ir * final_scale
+            self.report({'INFO'}, f"Final normalization to 0 dBFS (scale: {final_scale:.6f})")
+        
+        # Export to WAV file
+        if not HAVE_SF:
+            self.report({'ERROR'}, f"Cannot export WAV: {SF_ERROR}")
+            return {'CANCELLED'}
+        
+        # Use the same path generation as main operator, but with timestamp for iterations
+        try:
+            base_wav_path = get_writable_path("ir_output.wav")
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to determine output path: {str(e)}")
+            return {'CANCELLED'}
+        
+        # Use the same filename as main trace (overwriting is acceptable for iterations)
+        remix_path = base_wav_path
+        
+        try:
+            # Transpose for soundfile (samples x channels)
+            ir_transposed = hybrid_ir.T
+            sf.write(remix_path, ir_transposed, sample_rate, subtype=scene.airt_wav_subtype)
+            
+            # Update last export path
+            scene.airt_hybrid_last_export_path = remix_path
+            
+            import os
+            filename = os.path.basename(remix_path)
+            self.report({'INFO'}, f"Re-mixed hybrid IR exported to: {filename}")
+            self.report({'INFO'}, "Re-mix complete! Load the file in your DAW to audition.")
+            
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to export WAV: {str(e)}")
+            return {'CANCELLED'}
+        
+        return {'FINISHED'}
+    
+    def _crossfade_hybrid_irs(self, forward_ir: np.ndarray, reverse_ir: np.ndarray, sample_rate: int, 
+                             crossfade_start_ms: float, crossfade_length_ms: float, forward_final_level: float, reverse_final_level: float) -> np.ndarray:
+        """Crossfade forward and reverse IRs with independent final level controls."""
+        # Ensure both IRs have the same length
+        min_length = min(forward_ir.shape[1], reverse_ir.shape[1])
+        forward_ir = forward_ir[:, :min_length]
+        reverse_ir = reverse_ir[:, :min_length]
+        
+        # Calculate crossfade timing from user parameters
+        crossfade_start_samples = int((crossfade_start_ms / 1000.0) * sample_rate)
+        crossfade_end_samples = int(((crossfade_start_ms + crossfade_length_ms) / 1000.0) * sample_rate)
+        
+        # Clamp to valid range
+        crossfade_start_samples = max(0, min(crossfade_start_samples, min_length - 1))
+        crossfade_end_samples = max(crossfade_start_samples + 1, min(crossfade_end_samples, min_length))
+        
+        # Create weight arrays
+        forward_weight = np.ones(min_length)
+        reverse_weight = np.ones(min_length)
+        
+        # Early period: 100% forward, 0% reverse
+        forward_weight[:crossfade_start_samples] = 1.0
+        reverse_weight[:crossfade_start_samples] = 0.0
+        
+        # Transition period: independent crossfades for forward and reverse
+        if crossfade_end_samples > crossfade_start_samples:
+            transition_length = crossfade_end_samples - crossfade_start_samples
+            # Forward: fade from 1.0 down to forward_final_level (independent)
+            forward_transition = np.linspace(1.0, forward_final_level, transition_length)
+            # Reverse: fade from 0.0 up to reverse_final_level (independent)
+            reverse_transition = np.linspace(0.0, reverse_final_level, transition_length)
+            
+            forward_weight[crossfade_start_samples:crossfade_end_samples] = forward_transition
+            reverse_weight[crossfade_start_samples:crossfade_end_samples] = reverse_transition
+        
+        # Late period: each tracer at its independent final level
+        forward_weight[crossfade_end_samples:] = forward_final_level
+        reverse_weight[crossfade_end_samples:] = reverse_final_level
+        
+        # Apply weights and combine
+        hybrid_ir = (forward_ir * forward_weight[None, :] + 
+                    reverse_ir * reverse_weight[None, :])
+        
+        return hybrid_ir
+
+
+class AIRT_OT_ClearHybridCache(bpy.types.Operator):
+    """Clear cached hybrid IRs to force full retrace."""
+    bl_idname = "airt.clear_hybrid_cache"
+    bl_label = "Clear Cache & Full Retrace"
+    bl_description = "Clear cached forward and reverse IRs to force a complete retrace"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        """Clear the hybrid IR cache."""
+        _invalidate_cache(context)
+        self.report({'INFO'}, "Hybrid IR cache cleared. Next trace will be a complete retrace.")
+        return {'FINISHED'}
 
 
 class AIRT_OT_ValidateScene(bpy.types.Operator):

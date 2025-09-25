@@ -41,6 +41,8 @@ from .ui.panels import (
 )
 from .ui.operators import (
     AIRT_OT_RenderIR,
+    AIRT_OT_RemixHybridIR,
+    AIRT_OT_ClearHybridCache,
     AIRT_OT_ValidateScene,
     AIRT_OT_ResetMaterial,
     AIRT_OT_CopyMaterial,
@@ -61,6 +63,8 @@ classes = [
     
     # Operators
     AIRT_OT_RenderIR,
+    AIRT_OT_RemixHybridIR,
+    AIRT_OT_ClearHybridCache,
     AIRT_OT_ValidateScene,
     AIRT_OT_ResetMaterial,
     AIRT_OT_CopyMaterial,
