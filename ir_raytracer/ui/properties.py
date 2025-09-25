@@ -291,15 +291,15 @@ def register_acoustic_props():
         precision=1
     )
     
-    # Legacy property for backwards compatibility (not used in new workflow)
-    scene.airt_hybrid_reverb_ramp_time = bpy.props.FloatProperty(
-        name="Late Reverb Ramp (s)",
-        description="[Legacy - not used in new hybrid workflow] How quickly diffuse reverb builds up",
-        default=0.2,
-        min=0.05,
-        max=0.5,
-        step=5,   # 0.005s steps
-        precision=3
+    scene.airt_hybrid_forward_final_level = bpy.props.FloatProperty(
+        name="Forward Final Level (%)",
+        description="Final level of forward tracer after crossfade. 0% = completely fade out, 100% = no fade, 20% = keep some discrete late reflections",
+        default=0.0,
+        min=0.0,
+        max=100.0,
+        step=100,  # 1% steps
+        precision=1,
+        subtype='PERCENTAGE'
     )
     
     # Russian roulette settings
@@ -445,7 +445,7 @@ def unregister_acoustic_props():
     scene_attrs = [
         "airt_num_rays", "airt_passes", "airt_max_order", "airt_sr", "airt_ir_seconds",
         "airt_angle_tol_deg", "airt_wav_subtype", "airt_seed", "airt_recv_radius",
-        "airt_trace_mode", "airt_hybrid_forward_gain_db", "airt_hybrid_reverse_gain_db", "airt_hybrid_crossfade_start_ms", "airt_hybrid_crossfade_length_ms", "airt_hybrid_reverb_ramp_time",
+        "airt_trace_mode", "airt_hybrid_forward_gain_db", "airt_hybrid_reverse_gain_db", "airt_hybrid_crossfade_start_ms", "airt_hybrid_crossfade_length_ms", "airt_hybrid_forward_final_level",
         "airt_rr_enable", "airt_rr_start", "airt_rr_p",
         "airt_spec_rough_deg", "airt_enable_seg_capture", "airt_enable_diffraction",
         "airt_diffraction_samples", "airt_diffraction_max_deg",

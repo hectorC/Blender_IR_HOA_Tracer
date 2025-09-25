@@ -282,26 +282,25 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
             self.report({'ERROR'}, "Reverse tracer failed")
             return None
             
-        # Step 3: Post-process both individually (same as existing workflow)
+        # Step 1 & 2: Post-process both individually - remove direct and normalize each to 0dBFS
         self.report({'INFO'}, "Post-processing individual IRs...")
         
         # Remove direct impulse from both (always applied)
         forward_ir = self._remove_direct_impulse(forward_ir, config.sample_rate)
         reverse_ir = self._remove_direct_impulse(reverse_ir, config.sample_rate)
         
-        # Normalize both to 0 dBFS (always applied, same as existing workflow)
-        # Find peak across both IRs to maintain relative levels
+        # Normalize each IR individually to 0 dBFS (per specification steps 1 & 2)
         forward_peak = np.max(np.abs(forward_ir))
+        if forward_peak > 1e-9:
+            forward_ir = forward_ir / forward_peak
+            self.report({'INFO'}, f"Normalized forward IR to 0 dBFS (peak was {forward_peak:.6f})")
+        
         reverse_peak = np.max(np.abs(reverse_ir))
-        combined_peak = max(forward_peak, reverse_peak)
+        if reverse_peak > 1e-9:
+            reverse_ir = reverse_ir / reverse_peak
+            self.report({'INFO'}, f"Normalized reverse IR to 0 dBFS (peak was {reverse_peak:.6f})")
         
-        if combined_peak > 1e-9:
-            scale_factor = 1.0 / combined_peak
-            forward_ir = forward_ir * scale_factor
-            reverse_ir = reverse_ir * scale_factor
-            self.report({'INFO'}, f"Normalized both IRs to 0 dBFS (scale: {scale_factor:.6f})")
-        
-        # Step 3.5: Apply user gain adjustments to normalized IRs
+        # Step 3: Apply user gain adjustments to normalized IRs
         scene = context.scene
         forward_gain_db = float(scene.airt_hybrid_forward_gain_db)
         reverse_gain_db = float(scene.airt_hybrid_reverse_gain_db)
@@ -320,7 +319,12 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
         self.report({'INFO'}, "Crossfading forward and reverse IRs...")
         crossfade_start_ms = float(scene.airt_hybrid_crossfade_start_ms)
         crossfade_length_ms = float(scene.airt_hybrid_crossfade_length_ms)
-        hybrid_ir = self._crossfade_hybrid_irs(forward_ir, reverse_ir, config.sample_rate, crossfade_start_ms, crossfade_length_ms)
+        forward_final_level = float(scene.airt_hybrid_forward_final_level) / 100.0  # Convert % to 0.0-1.0
+        
+        # Debug reporting
+        self.report({'INFO'}, f"Crossfade: start={crossfade_start_ms}ms, length={crossfade_length_ms}ms, final_forward={forward_final_level*100:.1f}%")
+        
+        hybrid_ir = self._crossfade_hybrid_irs(forward_ir, reverse_ir, config.sample_rate, crossfade_start_ms, crossfade_length_ms, forward_final_level)
         
         # Step 5: Final normalization and output (same as existing workflow)
         final_peak = np.max(np.abs(hybrid_ir))
@@ -332,8 +336,8 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
         return hybrid_ir
     
     def _crossfade_hybrid_irs(self, forward_ir: np.ndarray, reverse_ir: np.ndarray, sample_rate: int, 
-                             crossfade_start_ms: float, crossfade_length_ms: float) -> np.ndarray:
-        """Crossfade forward and reverse IRs with user-controllable time-based weighting."""
+                             crossfade_start_ms: float, crossfade_length_ms: float, forward_final_level: float) -> np.ndarray:
+        """Crossfade forward and reverse IRs with user-controllable time-based weighting and final forward level."""
         # Ensure both IRs have the same length
         min_length = min(forward_ir.shape[1], reverse_ir.shape[1])
         forward_ir = forward_ir[:, :min_length]
@@ -347,6 +351,11 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
         crossfade_start_samples = max(0, min(crossfade_start_samples, min_length - 1))
         crossfade_end_samples = max(crossfade_start_samples + 1, min(crossfade_end_samples, min_length))
         
+        # Debug info: print the calculated sample positions
+        print(f"DEBUG Crossfade: start_ms={crossfade_start_ms}, length_ms={crossfade_length_ms}, final_level={forward_final_level}")
+        print(f"DEBUG Samples: start={crossfade_start_samples}, end={crossfade_end_samples}, total_length={min_length}")
+        print(f"DEBUG Times: start_time={crossfade_start_samples/sample_rate:.3f}s, end_time={crossfade_end_samples/sample_rate:.3f}s")
+        
         # Create weight arrays
         forward_weight = np.ones(min_length)
         reverse_weight = np.ones(min_length)
@@ -355,19 +364,32 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
         forward_weight[:crossfade_start_samples] = 1.0
         reverse_weight[:crossfade_start_samples] = 0.0
         
-        # Transition period: smooth crossfade
+        # Transition period: smooth crossfade from 100% forward to final_level% forward
         if crossfade_end_samples > crossfade_start_samples:
             transition_length = crossfade_end_samples - crossfade_start_samples
-            transition_ramp = np.linspace(0, 1, transition_length)
+            # Ramp from 1.0 down to forward_final_level (e.g., 0.0 for complete fade, 0.2 for 20% preserved)
+            forward_transition = np.linspace(1.0, forward_final_level, transition_length)
+            # Reverse ramp compensates to maintain total energy (but adjusted for forward final level)
+            reverse_transition = np.linspace(0.0, 1.0 - forward_final_level, transition_length)
             
-            forward_weight[crossfade_start_samples:crossfade_end_samples] = 1.0 - transition_ramp
-            reverse_weight[crossfade_start_samples:crossfade_end_samples] = transition_ramp
+            forward_weight[crossfade_start_samples:crossfade_end_samples] = forward_transition
+            reverse_weight[crossfade_start_samples:crossfade_end_samples] = reverse_transition
         
-        # Late period: 0% forward, 100% reverse
-        forward_weight[crossfade_end_samples:] = 0.0
-        reverse_weight[crossfade_end_samples:] = 1.0
+        # Late period: forward_final_level% forward, (1.0 - forward_final_level)% reverse
+        forward_weight[crossfade_end_samples:] = forward_final_level
+        reverse_weight[crossfade_end_samples:] = 1.0 - forward_final_level
         
-        # Apply weights and combine
+        # Debug: show weight values at key sample points
+        key_samples = [0, crossfade_start_samples, 
+                      int((crossfade_start_samples + crossfade_end_samples) / 2),  # midpoint
+                      crossfade_end_samples, min_length - 1]
+        print("DEBUG Weight values at key times:")
+        for sample_idx in key_samples:
+            if sample_idx < min_length:
+                time_s = sample_idx / sample_rate
+                print(f"  {time_s:.3f}s (sample {sample_idx}): forward={forward_weight[sample_idx]:.3f}, reverse={reverse_weight[sample_idx]:.3f}")
+        
+        # Apply weights and combine (both IRs are time-aligned from their common time=0)
         hybrid_ir = (forward_ir * forward_weight[None, :] + 
                     reverse_ir * reverse_weight[None, :])
         

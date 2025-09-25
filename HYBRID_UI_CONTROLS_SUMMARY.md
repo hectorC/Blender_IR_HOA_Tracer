@@ -3,7 +3,7 @@
 ### New UI Properties Added
 
 1. **`airt_hybrid_crossfade_start_ms`** (Float, default: 50.0ms)
-   - Range: 0.0 to 500.0ms
+   - Range: 0.0 to 2000.0ms
    - Controls when the crossfade from forward to reverse begins
    - Earlier = more diffuse sound, Later = more discrete echoes
 
@@ -12,7 +12,12 @@
    - Controls the duration of the crossfade transition
    - Shorter = abrupt change, Longer = smoother blend
 
-3. **Existing Gain Controls Repurposed:**
+3. **`airt_hybrid_forward_final_level`** (Float, default: 0.0%)
+   - Range: 0.0% to 100.0%
+   - Controls the final level of forward tracer after crossfade
+   - 0% = complete fadeout, 20% = preserve some late discrete reflections, 100% = no fadeout
+
+4. **Existing Gain Controls Repurposed:**
    - `airt_hybrid_forward_gain_db` (-24 to +24 dB, default: 0.0)
    - `airt_hybrid_reverse_gain_db` (-24 to +24 dB, default: 0.0)
 
@@ -41,12 +46,10 @@ The hybrid controls panel now shows:
 ├── Gain Adjustments:
 │   ├── Early: [Forward Gain dB slider]
 │   └── Reverb: [Reverse Gain dB slider]
-├── Crossfade Timing:
-│   ├── Start Time: [Start ms slider]  
-│   └── Fade Length: [Length ms slider]
-├── Legacy (unused):
-│   └── Reverb Onset: [Old parameter, for compatibility]
-└── [Preset buttons: Tunnel/Corridor | Cathedral | Reset]
+└── Crossfade Timing:
+    ├── Start Time: [Start ms slider]  (0-2000ms)
+    ├── Fade Length: [Length ms slider] (10-1000ms)
+    └── Forward Final Level: [0-100% slider]
 ```
 
 ### Default Values Match Current Behavior

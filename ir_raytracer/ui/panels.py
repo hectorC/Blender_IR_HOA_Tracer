@@ -96,33 +96,7 @@ class AIRT_PT_Panel(bpy.types.Panel):
             col.label(text="Crossfade Timing:")
             col.prop(scene, "airt_hybrid_crossfade_start_ms", text="Start Time")
             col.prop(scene, "airt_hybrid_crossfade_length_ms", text="Fade Length")
-            
-            # Legacy reverb ramp timing (for compatibility, but marked as unused)
-            col.separator()
-            col.label(text="Legacy (unused):")
-            col.prop(scene, "airt_hybrid_reverb_ramp_time", text="Reverb Onset")
-            
-            # Quick preset buttons for common scenarios
-            row = hybrid_box.row(align=True)
-            row.scale_y = 0.8
-            
-            # Tunnel/Corridor preset button
-            op = row.operator("airt.hybrid_preset", text="Tunnel/Corridor")
-            op.forward_gain = 2.0
-            op.reverse_gain = -1.0  
-            op.ramp_time = 0.3
-            
-            # Cathedral preset button  
-            op = row.operator("airt.hybrid_preset", text="Cathedral")
-            op.forward_gain = -1.0
-            op.reverse_gain = 2.0
-            op.ramp_time = 0.15
-            
-            # Reset button
-            op = row.operator("airt.hybrid_preset", text="Reset")
-            op.forward_gain = 0.0
-            op.reverse_gain = 0.0
-            op.ramp_time = 0.2
+            col.prop(scene, "airt_hybrid_forward_final_level", text="Forward Final Level")
         
         layout.separator()
         
