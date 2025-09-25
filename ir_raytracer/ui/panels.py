@@ -77,20 +77,29 @@ class AIRT_PT_Panel(bpy.types.Panel):
         icon = 'PLAY' if scene.airt_quick_broadband else 'RENDER_ANIMATION'
         row.prop(scene, "airt_quick_broadband", text="Fast Preview Mode", toggle=True, icon=icon)
         
-        # HYBRID BALANCE CONTROLS - Show only when Hybrid mode is selected
+        # HYBRID CROSSFADE CONTROLS - Show only when Hybrid mode is selected
         if scene.airt_trace_mode == 'HYBRID':
             hybrid_box = box.box()
-            hybrid_box.label(text="🎛️ Hybrid Balance Controls", icon='PREFERENCES')
+            hybrid_box.label(text="🎛️ Hybrid Crossfade Controls", icon='PREFERENCES')
             
             # Advanced controls in a clean layout
             col = hybrid_box.column(align=True)
             
             # Forward/Reverse gain controls
+            col.label(text="Gain Adjustments:")
             row = col.row(align=True)
             row.prop(scene, "airt_hybrid_forward_gain_db", text="Early")
             row.prop(scene, "airt_hybrid_reverse_gain_db", text="Reverb") 
             
-            # Reverb ramp timing
+            # Crossfade timing controls
+            col.separator()
+            col.label(text="Crossfade Timing:")
+            col.prop(scene, "airt_hybrid_crossfade_start_ms", text="Start Time")
+            col.prop(scene, "airt_hybrid_crossfade_length_ms", text="Fade Length")
+            
+            # Legacy reverb ramp timing (for compatibility, but marked as unused)
+            col.separator()
+            col.label(text="Legacy (unused):")
             col.prop(scene, "airt_hybrid_reverb_ramp_time", text="Reverb Onset")
             
             # Quick preset buttons for common scenarios

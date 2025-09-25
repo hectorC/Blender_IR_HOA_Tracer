@@ -250,7 +250,7 @@ def register_acoustic_props():
         update=_update_tracing_mode_defaults
     )
     
-    # HYBRID BALANCE CONTROLS - Advanced user settings for fine-tuning hybrid blend
+    # HYBRID CROSSFADE CONTROLS - New workflow crossfade timing and balance
     scene.airt_hybrid_forward_gain_db = bpy.props.FloatProperty(
         name="Forward Tracer Gain (dB)",
         description="Boost/cut discrete echoes and early reflections. +dB = stronger echoes, -dB = softer echoes",
@@ -271,9 +271,30 @@ def register_acoustic_props():
         precision=1
     )
     
+    scene.airt_hybrid_crossfade_start_ms = bpy.props.FloatProperty(
+        name="Crossfade Start (ms)",
+        description="Time when crossfade from forward to reverse begins. Earlier = more diffuse sound, Later = more discrete echoes",
+        default=50.0,
+        min=0.0,
+        max=2000.0,
+        step=100,  # 1ms steps
+        precision=1
+    )
+    
+    scene.airt_hybrid_crossfade_length_ms = bpy.props.FloatProperty(
+        name="Crossfade Length (ms)",
+        description="Duration of the crossfade transition. Shorter = abrupt change, Longer = smoother blend",
+        default=150.0,  # 200ms - 50ms = 150ms current length
+        min=10.0,
+        max=1000.0,
+        step=100,  # 1ms steps
+        precision=1
+    )
+    
+    # Legacy property for backwards compatibility (not used in new workflow)
     scene.airt_hybrid_reverb_ramp_time = bpy.props.FloatProperty(
         name="Late Reverb Ramp (s)",
-        description="How quickly diffuse reverb builds up. Shorter = earlier reverb onset, Longer = more discrete early period",
+        description="[Legacy - not used in new hybrid workflow] How quickly diffuse reverb builds up",
         default=0.2,
         min=0.05,
         max=0.5,
@@ -424,7 +445,7 @@ def unregister_acoustic_props():
     scene_attrs = [
         "airt_num_rays", "airt_passes", "airt_max_order", "airt_sr", "airt_ir_seconds",
         "airt_angle_tol_deg", "airt_wav_subtype", "airt_seed", "airt_recv_radius",
-        "airt_trace_mode", "airt_hybrid_forward_gain_db", "airt_hybrid_reverse_gain_db", "airt_hybrid_reverb_ramp_time",
+        "airt_trace_mode", "airt_hybrid_forward_gain_db", "airt_hybrid_reverse_gain_db", "airt_hybrid_crossfade_start_ms", "airt_hybrid_crossfade_length_ms", "airt_hybrid_reverb_ramp_time",
         "airt_rr_enable", "airt_rr_start", "airt_rr_p",
         "airt_spec_rough_deg", "airt_enable_seg_capture", "airt_enable_diffraction",
         "airt_diffraction_samples", "airt_diffraction_max_deg",
