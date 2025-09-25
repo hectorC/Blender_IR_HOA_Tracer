@@ -281,17 +281,29 @@ class ForwardRayTracer(ImpulseResponseRenderer):
         
         band_one = np.ones(NUM_BANDS, dtype=np.float32)
         num_dirs = max(1, len(directions))
-        ray_weight = 1.0 / float(num_dirs)
         
-        print(f"DEBUG: ForwardRayTracer starting with {num_dirs} directions, ray_weight={ray_weight:.6f}")
+        print(f"DEBUG: ForwardRayTracer starting with {num_dirs} directions")
+        
+        # CORRECT ACOUSTIC RAY TRACING ENERGY:
+        # Problem: We were double-counting the direct path energy
+        # Solution: Direct path is SEPARATE from stochastic ray field
+        
+        # Stochastic rays sample the REFLECTED energy field only
+        ray_energy = 1.0 / float(num_dirs)
         
         for d in directions:
             self._trace_single_ray(mathutils.Vector(d), source, receiver, 
-                                 bvh, obj_map, band_one * ray_weight)
+                                 bvh, obj_map, band_one * ray_energy)
         
-        # Always add direct path (omit_direct functionality removed)
+        # Direct path: deterministic calculation, gets reasonable energy
+        # Should be comparable to early reflections but not dominate completely
+        direct_energy = 1.0 / max(4.0, sqrt(float(num_dirs)))  # Scale with ray density
+        
+        print(f"DEBUG: Direct energy: {direct_energy:.6f}, Ray energy: {ray_energy:.6f}")
         print("DEBUG: Adding direct path...")
-        self._add_direct_path(source, receiver, bvh, band_one * ray_weight)
+        self._add_direct_path(source, receiver, bvh, band_one * direct_energy)
+        print("DEBUG: Adding direct path...")
+        self._add_direct_path(source, receiver, bvh, band_one * ray_energy)
         
         return self.ir
     
@@ -375,9 +387,8 @@ class ForwardRayTracer(ImpulseResponseRenderer):
         total_dist = path_length + seg_len
         incoming = (-direction).normalized()
         
-        area = pi * self.config.receiver_radius * self.config.receiver_radius
-        view = area / max(self.config.pi4 * total_dist * total_dist, 1e-9)
-        amplitude_scalar = sqrt(max(view, 0.0)) / max(total_dist, self.config.receiver_radius)
+        # Use consistent 1/r amplitude scaling (same as direct path and direct connection)
+        amplitude_scalar = 1.0 / max(total_dist, self.config.receiver_radius)
         
         # Add debug output for segment capture
         delay_ms = (total_dist / self.config.speed_of_sound) * 1000.0

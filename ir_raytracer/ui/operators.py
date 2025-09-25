@@ -180,8 +180,26 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
             subtype = scene.airt_wav_subtype
             wav_path = get_writable_path("ir_output.wav")
             
+            # POST-PROCESSING: Remove direct impulse to isolate reflections
+            ir_processed = self._remove_direct_impulse(ir, sr)
+            
+            # MULTICHANNEL NORMALIZATION: Normalize to 0 dBFS (peak = 1.0)
+            ir_max_abs = np.max(np.abs(ir_processed))
+            if ir_max_abs > 1e-12:  # Only normalize if there's actual signal
+                # Target peak level: 0 dBFS (1.0) - maximum digital level
+                target_peak = 1.0
+                normalization_factor = target_peak / ir_max_abs
+                ir_normalized = ir_processed * normalization_factor
+                
+                # Report normalization details
+                gain_db = 20 * np.log10(normalization_factor)
+                self.report({'INFO'}, f"IR normalized to 0 dBFS: peak {ir_max_abs:.3f} -> {target_peak:.3f} ({gain_db:+.1f} dB gain)")
+            else:
+                ir_normalized = ir_processed
+                self.report({'WARNING'}, "IR contains no signal after direct removal - no normalization applied")
+            
             # Transpose for soundfile (expects channels x samples -> samples x channels)
-            sf.write(wav_path, ir.T.astype(np.float32), samplerate=sr, subtype=subtype)
+            sf.write(wav_path, ir_normalized.T.astype(np.float32), samplerate=sr, subtype=subtype)
             
             self.report({'INFO'}, f"IR saved to {wav_path} ({subtype}, {ir.shape[0]} channels, {ir.shape[1]} samples)")
             
@@ -190,6 +208,41 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
             return {'CANCELLED'}
         
         return {'FINISHED'}
+
+    def _remove_direct_impulse(self, ir: np.ndarray, sample_rate: int) -> np.ndarray:
+        """Remove the direct impulse spike from IR to isolate reflections."""
+        
+        # Create a copy to avoid modifying original
+        ir_processed = ir.copy()
+        
+        # Use W channel (index 0) to detect the direct impulse in ambisonic signal
+        w_channel = ir[0, :]
+        
+        # Find the strongest early impulse (likely the direct path)
+        early_window_samples = int(0.1 * sample_rate)  # Search first 100ms
+        early_segment = np.abs(w_channel[:early_window_samples])
+        
+        if early_segment.size == 0:
+            self.report({'WARNING'}, "No early samples to analyze for direct removal")
+            return ir_processed
+            
+        direct_peak_idx = np.argmax(early_segment)
+        direct_peak_value = early_segment[direct_peak_idx]
+        
+        # Define impulse window around the peak to remove
+        impulse_half_width = max(16, int(0.001 * sample_rate))  # 1ms or 16 samples minimum
+        start_idx = max(0, direct_peak_idx - impulse_half_width)
+        end_idx = min(ir.shape[1], direct_peak_idx + impulse_half_width + 1)
+        
+        # Zero out the direct impulse in ALL channels (preserve ambisonic balance)
+        ir_processed[:, start_idx:end_idx] = 0.0
+        
+        # Report what was removed
+        direct_time_ms = (direct_peak_idx / sample_rate) * 1000.0
+        window_width_ms = ((end_idx - start_idx) / sample_rate) * 1000.0
+        self.report({'INFO'}, f"Direct impulse removed: peak at {direct_time_ms:.1f}ms, zeroed {window_width_ms:.1f}ms window")
+        
+        return ir_processed
 
 
 class AIRT_OT_ValidateScene(bpy.types.Operator):
