@@ -237,12 +237,6 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
         # Import soundfile after confirming it's available
         import soundfile as sf
         
-        from ..core.ambisonic import HAVE_SCIPY
-        if not HAVE_SCIPY:
-            cmd = f"{sys.executable} -m pip install scipy"
-            self.report({'ERROR'}, "scipy is required for SH encoding. Install with:\n" + cmd)
-            return {'CANCELLED'}
-        
         # Validate scene setup
         scene = context.scene
         sources = get_scene_sources(context)
@@ -885,7 +879,6 @@ class AIRT_OT_CheckDependencies(bpy.types.Operator):
     def execute(self, context):
         """Check dependencies and provide installation instructions."""
         import sys
-        import subprocess
         
         # Check soundfile
         sf_available, sf_error = check_soundfile_availability()
@@ -902,14 +895,7 @@ class AIRT_OT_CheckDependencies(bpy.types.Operator):
             self.report({'INFO'}, f"Install command: {pip_cmd}")
             self.report({'INFO'}, "Or restart Blender after installing soundfile")
         
-        # Check scipy
-        try:
-            import scipy
-            self.report({'INFO'}, "✓ scipy is available")
-        except ImportError:
-            self.report({'WARNING'}, "✗ scipy not available (required for spherical harmonics)")
-            pip_cmd = f'"{sys.executable}" -m pip install scipy'
-            self.report({'INFO'}, f"Install command: {pip_cmd}")
+        self.report({'INFO'}, "✓ ACN/SN3D spherical harmonics are built in")
         
         # Check numpy
         try:

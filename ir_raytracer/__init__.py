@@ -16,7 +16,7 @@ Features:
 
 bl_info = {
     "name": "Ambisonic IR Tracer",
-    "blender": (4, 5, 0),
+    "blender": (5, 2, 1),
     "category": "Object",
     "author": "ChatGPT + Hector Centeno",
     "description": "Trace impulse responses with 3rd-order ambisonic encoding (ACN/SN3D) using reverse ray tracing with specular and diffuse reflections",

@@ -17,10 +17,9 @@ A professional-grade physics-based ray tracer that simulates room acoustics by t
 - **Production-ready output**: 32-bit float WAV files, sample rates up to 192kHz with quality controls
 
 ## Requirements
-- Blender 4.5 or newer (matches the add-on `bl_info`)
+- Blender 5.2.1 LTS (development and test target; matches the add-on `bl_info`)
 - Python packages:
   - `soundfile` (used for writing multi-channel WAV files)
-  - `scipy` (provides `scipy.special.lpmv` for spherical harmonics)
 
 `numpy` ships with Blender and is used extensively by the add-on.
 
@@ -87,20 +86,20 @@ The hybrid approach intelligently blends two complementary ray tracing strategie
 import bpy, subprocess, sys
 pybin = bpy.app.binary_path_python
 subprocess.check_call([pybin, "-m", "pip", "install", "--upgrade", "pip"])
-subprocess.check_call([pybin, "-m", "pip", "install", "soundfile", "scipy"])
+subprocess.check_call([pybin, "-m", "pip", "install", "soundfile"])
 ```
 
    **Alternative method** - Run from command line (adjust path for your Blender version):
 
 ```bash
 # Windows example
-"C:\Program Files\Blender Foundation\Blender 4.5\4.5\python\bin\python.exe" -m pip install soundfile scipy
+"C:\Program Files\Blender Foundation\Blender 5.2\5.2\python\bin\python.exe" -m pip install soundfile
 
 # macOS example  
-"/Applications/Blender.app/Contents/Resources/4.5/python/bin/python3.10" -m pip install soundfile scipy
+"/Applications/Blender.app/Contents/Resources/5.2/python/bin/python3.13" -m pip install soundfile
 
 # Linux example
-"/opt/blender/4.5/python/bin/python3.10" -m pip install soundfile scipy
+"/opt/blender/5.2/python/bin/python3.13" -m pip install soundfile
 ```
 
 5. **Restart Blender** after installing dependencies so the add-on can import the required packages
@@ -108,7 +107,7 @@ subprocess.check_call([pybin, "-m", "pip", "install", "soundfile", "scipy"])
 ### Verify Installation
 - Open the **3D Viewport** → **Sidebar** (press `N`) → **IR Tracer** tab
 - You should see the complete ray tracing interface with material presets and tracing mode options
-- Use **Check Dependencies** in the Diagnostics panel to verify soundfile and scipy are properly installed
+- Use **Check Dependencies** in the Diagnostics panel to verify soundfile is properly installed
 
 ## Usage
 
