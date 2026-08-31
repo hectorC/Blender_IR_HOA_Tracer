@@ -157,6 +157,7 @@ Each material defines separate absorption and scattering coefficients per band, 
    - For Hybrid mode, adjust **Forward/Reverse Gain** (±24dB) to fine-tune acoustic character.
    - Set the number of rays, averaging passes, maximum bounce order, sample rate, IR length, and receiver radius.
    - Enable **Fast Preview Mode** for quick broadband testing, disable for final production.
+   - Choose **IR Content**: *Full IR* includes the direct arrival; *Reverb Only* keeps reflections and the tail for use with a separately routed dry signal.
    - Optionally configure advanced settings: Russian roulette (default: 40 bounces, 0.99 survival), diffraction, and air absorption.
    - Adjust ambisonic orientation settings (yaw offset, invert Z) to match your downstream decoder.
 3. **Render the impulse response**
@@ -205,8 +206,8 @@ Each material defines separate absorption and scattering coefficients per band, 
 - **Min Throughput**: 1e-8 to 1e-2 minimum ray energy before termination. Lower allows weaker rays to contribute (default: 1e-6, improved sensitivity).
 - **Specular Roughness**: 0-30° angular spread of specular reflections. 0° = perfect mirror, higher = more diffuse specular behavior (default: 5.0°).
 - **Flip Z (up/down)**: Inverts the ambisonic Z axis (useful for matching systems that assume left-handed coordinates).
-- **Calibrate Direct (1/r)**: Scales the entire impulse response so the direct-path amplitude matches 1/distance, aiding distance cues.
-- **Omit Direct (reverb-only)**: Excludes the direct sound from the rendered IR so you can route dry/direct separately and use this IR purely for reverberation.
+- **IR Content**: **Full IR** emits one deterministic line-of-sight direct arrival plus room reflections. **Reverb Only** suppresses the direct arrival during tracing, without deleting an arbitrary early-time window, so the dry signal can be routed separately.
+- **Calibrate Direct (1/r)**: In Full IR mode, scales the entire impulse response so the direct-path W-channel amplitude matches 1/distance. The calibrated level is preserved in 32-bit float output instead of being cancelled by peak normalization.
 - **Air Absorption (freq)**: Enables ISO 9613-1 based air absorption filtering per path length.
 - **Air Temp (deg C)**: Air temperature used in the absorption model.
 - **Rel Humidity (%)**: Relative humidity percentage for the absorption model.

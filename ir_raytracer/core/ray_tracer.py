@@ -4,7 +4,7 @@ Ray tracing engine for acoustic impulse response rendering.
 """
 import mathutils
 import numpy as np
-from math import pi, sqrt, cos, exp, acos
+from math import pi, cos, exp, acos
 import random
 from typing import List, Tuple, Optional, Any
 from abc import ABC, abstractmethod
@@ -62,6 +62,9 @@ class RayTracingConfig:
         self.air_pressure_kpa = float(getattr(scene, 'airt_air_pressure_kpa', 101.325))
         
         # Output options
+        output_content = getattr(scene, 'airt_output_content', 'FULL')
+        self.output_content = output_content if output_content in {'FULL', 'REVERB_ONLY'} else 'FULL'
+        self.include_direct = self.output_content == 'FULL'
         self.quick_broadband = bool(getattr(scene, 'airt_quick_broadband', False))
         self.min_throughput = float(getattr(scene, 'airt_min_throughput', 1e-4))
         
@@ -284,26 +287,17 @@ class ForwardRayTracer(ImpulseResponseRenderer):
         
         print(f"DEBUG: ForwardRayTracer starting with {num_dirs} directions")
         
-        # CORRECT ACOUSTIC RAY TRACING ENERGY:
-        # Problem: We were double-counting the direct path energy
-        # Solution: Direct path is SEPARATE from stochastic ray field
-        
-        # Stochastic rays sample the REFLECTED energy field only
+        # Stochastic rays sample the reflected field. The zero-bounce path is
+        # evaluated separately so its level does not depend on ray count.
         ray_energy = 1.0 / float(num_dirs)
         
         for d in directions:
             self._trace_single_ray(mathutils.Vector(d), source, receiver, 
                                  bvh, obj_map, band_one * ray_energy)
         
-        # Direct path: deterministic calculation, gets reasonable energy
-        # Should be comparable to early reflections but not dominate completely
-        direct_energy = 1.0 / max(4.0, sqrt(float(num_dirs)))  # Scale with ray density
-        
-        print(f"DEBUG: Direct energy: {direct_energy:.6f}, Ray energy: {ray_energy:.6f}")
-        print("DEBUG: Adding direct path...")
-        self._add_direct_path(source, receiver, bvh, band_one * direct_energy)
-        print("DEBUG: Adding direct path...")
-        self._add_direct_path(source, receiver, bvh, band_one * ray_energy)
+        if self.config.include_direct:
+            print("DEBUG: Adding deterministic direct path (forward tracer)...")
+            self._add_direct_path(source, receiver, bvh, band_one)
         
         return self.ir
     
@@ -322,9 +316,10 @@ class ForwardRayTracer(ImpulseResponseRenderer):
             hit, normal, index, dist = bvh.ray_cast(pos + dirn * self.config.eps, dirn)
             
             if hit is None or index is None:
-                # Ray escaped - check for segment capture
-                # Note: segment capture is different from direct path - always allow it
-                if self.config.segment_capture:
+                # The deterministic direct-path calculation owns bounce zero.
+                # Capturing it here would make its level ray-count dependent and
+                # could duplicate it in Full IR mode.
+                if self.config.segment_capture and bounce > 0:
                     self._check_segment_capture(pos, dirn, receiver, throughput, path_length)
                 break
             
@@ -346,7 +341,7 @@ class ForwardRayTracer(ImpulseResponseRenderer):
                 break
             
             # Segment capture for ray segments 
-            if self.config.segment_capture:
+            if self.config.segment_capture and bounce > 0:
                 self._check_segment_capture(pos, dirn, receiver, throughput, path_length, hit_point)
             
             # Direct connection to receiver
@@ -620,9 +615,9 @@ class ReverseRayTracer(ImpulseResponseRenderer):
             ir_max_after = np.max(np.abs(self.ir))
             print(f"DEBUG: IR normalization result - After: {ir_max_after:.2e}")
         
-        # Always add direct path (omit_direct functionality removed)
-        print("DEBUG: Adding direct path (reverse tracer)...")
-        self._add_direct_path(source, receiver, bvh, band_one)
+        if self.config.include_direct:
+            print("DEBUG: Adding deterministic direct path (reverse tracer)...")
+            self._add_direct_path(source, receiver, bvh, band_one)
         
         print(f"DEBUG: Reverse tracer completed {rays_traced} rays")
         if hasattr(self, 'connection_count'):
@@ -694,7 +689,7 @@ class ReverseRayTracer(ImpulseResponseRenderer):
             if self.config.air_enable:
                 throughput *= self._calculate_air_absorption(seg_length)
             
-            # Always check for direct connection to source (omit_direct functionality removed)
+            # Connect this reflected path back to the source when visible.
             self._check_source_connection(hit_point, normal, target, throughput, 
                                         material, path_length, bvh, incoming_direction, bounce)
             
@@ -930,8 +925,6 @@ def trace_impulse_response(context, source: mathutils.Vector, receiver: mathutil
     # Get user's preferred tracing mode
     user_trace_mode = context.scene.airt_trace_mode
     
-    # Determine optimal strategy based on requirements
-    # Omit_direct functionality removed - always use user-selected trace mode
     if user_trace_mode == 'HYBRID':
         # Professional hybrid approach: combine both methods
         print(f"Hybrid tracing: combining Forward (early) + Reverse (late) for optimal results")
@@ -955,14 +948,15 @@ def _trace_hybrid(config: RayTracingConfig, source: mathutils.Vector, receiver: 
     print(f"  Forward rays: {len(early_rays)} (early reflections)")
     print(f"  Reverse rays: {len(late_rays)} (late reverb)")
     
-    # Forward tracing for direct path + early reflections
+    # Forward tracing owns the direct path and early reflections.
     forward_tracer = create_ray_tracer('FORWARD', config)
     ir_early = forward_tracer.trace_rays(source, receiver, bvh, obj_map, early_rays)
     
-    # Reverse tracing for diffuse reverb tail (skip direct path)
+    # Reverse tracing contributes only the diffuse tail in hybrid mode. This
+    # avoids adding the same deterministic direct path twice.
     import copy
     config_late = copy.deepcopy(config)  # Create copy for late reverb
-    # Note: omit_direct functionality removed - reverse tracer handles direct path separately
+    config_late.include_direct = False
     reverse_tracer = create_ray_tracer('REVERSE', config_late)
     ir_late = reverse_tracer.trace_rays(source, receiver, bvh, obj_map, late_rays)
     

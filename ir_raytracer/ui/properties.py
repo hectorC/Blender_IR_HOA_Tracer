@@ -241,6 +241,17 @@ def register_acoustic_props():
         ],
         default='FLOAT'
     )
+
+    scene.airt_output_content = bpy.props.EnumProperty(
+        name="IR Content",
+        description="Choose whether the rendered IR includes the line-of-sight direct sound",
+        items=[
+            ('FULL', 'Full IR', 'Include one line-of-sight direct arrival plus room reflections'),
+            ('REVERB_ONLY', 'Reverb Only', 'Suppress the direct arrival while retaining reflections and the reverb tail')
+        ],
+        default='FULL',
+        update=_update_cache_invalidating_property
+    )
     
     scene.airt_seed = bpy.props.IntProperty(
         name="Random Seed",
@@ -454,8 +465,10 @@ def register_acoustic_props():
     )
     
     scene.airt_calibrate_direct = bpy.props.BoolProperty(
-        name="Calibrate direct (1/r)", 
-        default=True
+        name="Calibrate direct (1/r)",
+        description="In Full IR mode, scale the IR so the direct W-channel amplitude follows 1/distance",
+        default=True,
+        update=_update_cache_invalidating_property
     )
     
     # Air absorption settings
@@ -524,7 +537,7 @@ def unregister_acoustic_props():
     # Scene properties  
     scene_attrs = [
         "airt_num_rays", "airt_passes", "airt_max_order", "airt_sr", "airt_ir_seconds",
-        "airt_angle_tol_deg", "airt_wav_subtype", "airt_seed", "airt_recv_radius",
+        "airt_angle_tol_deg", "airt_wav_subtype", "airt_output_content", "airt_seed", "airt_recv_radius",
         "airt_trace_mode", "airt_hybrid_forward_gain_db", "airt_hybrid_reverse_gain_db", "airt_hybrid_crossfade_start_ms", "airt_hybrid_crossfade_length_ms", "airt_hybrid_forward_final_level", "airt_hybrid_reverse_final_level",
         "airt_hybrid_cache_valid", "airt_hybrid_cache_forward_ir", "airt_hybrid_cache_reverse_ir", "airt_hybrid_cache_sample_rate", "airt_hybrid_cache_ir_length", "airt_hybrid_cache_channels", "airt_hybrid_cache_scene_hash", "airt_hybrid_last_export_path",
         "airt_rr_enable", "airt_rr_start", "airt_rr_p",

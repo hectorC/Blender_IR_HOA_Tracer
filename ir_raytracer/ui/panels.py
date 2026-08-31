@@ -235,6 +235,7 @@ class AIRT_PT_AudioPanel(bpy.types.Panel):
         col.prop(scene, "airt_sr", text="Sample Rate")
         col.prop(scene, "airt_ir_seconds", text="Duration (s)")
         col.prop(scene, "airt_wav_subtype", text="WAV Format")
+        col.prop(scene, "airt_output_content", text="IR Content")
         
         # Spatial settings
         box = layout.box()
@@ -243,7 +244,9 @@ class AIRT_PT_AudioPanel(bpy.types.Panel):
         col = box.column(align=True)
         col.prop(scene, "airt_yaw_offset_deg", text="Yaw Offset (°)")
         col.prop(scene, "airt_invert_z", text="Invert Z-axis")
-        col.prop(scene, "airt_calibrate_direct", text="Calibrate Direct Path")
+        calibration_row = col.row(align=True)
+        calibration_row.enabled = scene.airt_output_content == 'FULL'
+        calibration_row.prop(scene, "airt_calibrate_direct", text="Calibrate Direct Path")
 
 
 class AIRT_PT_MaterialPanel(bpy.types.Panel):

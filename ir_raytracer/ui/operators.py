@@ -3,6 +3,7 @@
 Operators for the Ambisonic IR Tracer.
 """
 import bpy
+import copy
 import sys
 import random
 import numpy as np
@@ -85,6 +86,7 @@ def _compute_scene_hash(context) -> str:
         'min_throughput': scene.airt_min_throughput,
         'yaw_offset_deg': scene.airt_yaw_offset_deg,
         'invert_z': scene.airt_invert_z,
+        'output_content': scene.airt_output_content,
         'calibrate_direct': scene.airt_calibrate_direct
     }
     
@@ -163,59 +165,38 @@ except ImportError:
 
 
 def calibrate_direct_1_over_r(ir: np.ndarray, context, source, receiver):
-    """Scale the entire IR so that the direct-path amplitude in W matches 1/dist."""
+    """Scale the IR so the measured direct W amplitude matches 1/distance."""
     try:
-        from ..utils.scene_utils import speed_of_sound_bu
+        from ..utils.scene_utils import get_scene_unit_scale, speed_of_sound_bu
         
         sr = int(context.scene.airt_sr)
         c = speed_of_sound_bu(context)
-        dist = (receiver - source).length
+        dist_bu = (receiver - source).length
+        dist_m = dist_bu * get_scene_unit_scale(context)
         
-        if dist <= 1e-9 or ir.shape[1] <= 22:
-            return ir, "Calibrate: skipped (zero distance or IR too short)"
+        if dist_bu <= 1e-9 or dist_m <= 1e-9 or ir.shape[1] <= 22:
+            return ir, "Calibrate: skipped (zero distance or IR too short)", False
         
-        delay = (dist / c) * sr
+        delay = (dist_bu / c) * sr
         n = int(round(delay))
         n0 = max(0, n - 10)
         n1 = min(ir.shape[1], n + 11)
         
         a_meas = float(np.max(np.abs(ir[0, n0:n1])))
         if a_meas <= 1e-9:
-            # Direct path blocked - try early reflection calibration
-            # Look for strongest reflection in first 200ms
-            early_limit_ms = 200.0  # 200ms window for early reflections
-            early_samples = int((early_limit_ms / 1000.0) * sr)
-            early_samples = min(early_samples, ir.shape[1])
-            
-            # Find the strongest peak in early window
-            early_peak = float(np.max(np.abs(ir[0, :early_samples])))
-            
-            if early_peak > 1e-9:
-                # Find the time of the strongest peak
-                peak_idx = int(np.argmax(np.abs(ir[0, :early_samples])))
-                peak_time_s = peak_idx / sr
-                
-                # Estimate reflection path distance (approximate)
-                # For wall occlusion: source -> wall -> receiver is roughly 1.5-2x direct distance
-                estimated_reflection_dist = dist * 1.7  # Conservative estimate
-                
-                # Use reflection-based calibration
-                a_exp = 1.0 / max(estimated_reflection_dist, 1e-9)
-                k = a_exp / early_peak
-                ir *= k
-                
-                return ir, f"Calibrate: blocked direct, using reflection at {peak_time_s*1000:.1f}ms, est_dist={estimated_reflection_dist:.2f}m, k={k:.4f}"
-            else:
-                return ir, f"Calibrate: skipped (no direct energy near n~{n}, no early reflections found)"
+            # A blocked direct path has no physically defined direct reference.
+            # Scaling from an arbitrary early reflection would change the room
+            # balance unpredictably, so leave the render untouched.
+            return ir, f"Calibrate: skipped (no direct arrival near sample {n})", False
         
-        a_exp = 1.0 / max(dist, 1e-9)
+        a_exp = 1.0 / dist_m
         k = a_exp / a_meas
         ir *= k
         
-        return ir, f"Calibrate: dist={dist:.3f}m, expW={a_exp:.6f}, measW={a_meas:.6f}, k={k:.4f}, n~{n}, window=+/-10"
+        return ir, f"Calibrate: dist={dist_m:.3f}m, expW={a_exp:.6f}, measW={a_meas:.6f}, k={k:.4f}, n~{n}, window=+/-10", True
     
     except Exception as e:
-        return ir, f"Calibrate: skipped (err: {e})"
+        return ir, f"Calibrate: skipped (err: {e})", False
 
 
 class AIRT_OT_RenderIR(bpy.types.Operator):
@@ -292,11 +273,17 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
         # Average across passes and convert back to float32
         ir = (ir / float(passes)).astype(np.float32)
         
-        # Optional direct path calibration - BUT NOT if direct path is omitted!
-        should_calibrate = bool(getattr(scene, 'airt_calibrate_direct', False))
+        output_content = getattr(scene, 'airt_output_content', 'FULL')
+        should_calibrate = (
+            output_content == 'FULL'
+            and bool(getattr(scene, 'airt_calibrate_direct', False))
+        )
+        calibration_applied = False
         
         if should_calibrate:
-            ir, cal_info = calibrate_direct_1_over_r(ir, context, source, receiver)
+            ir, cal_info, calibration_applied = calibrate_direct_1_over_r(
+                ir, context, source, receiver
+            )
             self.report({'INFO'}, cal_info)
         
         
@@ -306,26 +293,26 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
             subtype = scene.airt_wav_subtype
             wav_path = get_writable_path("ir_output.wav")
             
-            # POST-PROCESSING: Remove direct impulse to isolate reflections
-            ir_processed = self._remove_direct_impulse(ir, sr)
-            
-            # MULTICHANNEL NORMALIZATION: Normalize to 0 dBFS (peak = 1.0)
-            ir_max_abs = np.max(np.abs(ir_processed))
-            if ir_max_abs > 1e-12:  # Only normalize if there's actual signal
-                # Target peak level: 0 dBFS (1.0) - maximum digital level
+            ir_max_abs = float(np.max(np.abs(ir)))
+            if calibration_applied:
+                # Peak normalization would cancel the absolute 1/r calibration.
+                ir_export = ir
+                self.report({'INFO'}, f"Preserving calibrated IR level (peak {ir_max_abs:.3f})")
+                if subtype != 'FLOAT' and ir_max_abs > 1.0:
+                    self.report({'WARNING'}, "Calibrated peak exceeds 0 dBFS; use 32-bit Float to avoid PCM clipping")
+            elif ir_max_abs > 1e-12:
                 target_peak = 1.0
                 normalization_factor = target_peak / ir_max_abs
-                ir_normalized = ir_processed * normalization_factor
+                ir_export = ir * normalization_factor
                 
-                # Report normalization details
                 gain_db = 20 * np.log10(normalization_factor)
                 self.report({'INFO'}, f"IR normalized to 0 dBFS: peak {ir_max_abs:.3f} -> {target_peak:.3f} ({gain_db:+.1f} dB gain)")
             else:
-                ir_normalized = ir_processed
-                self.report({'WARNING'}, "IR contains no signal after direct removal - no normalization applied")
+                ir_export = ir
+                self.report({'WARNING'}, "IR contains no signal - no normalization applied")
             
             # Transpose for soundfile (expects channels x samples -> samples x channels)
-            sf.write(wav_path, ir_normalized.T.astype(np.float32), samplerate=sr, subtype=subtype)
+            sf.write(wav_path, ir_export.T.astype(np.float32), samplerate=sr, subtype=subtype)
             
             self.report({'INFO'}, f"IR saved to {wav_path} ({subtype}, {ir.shape[0]} channels, {ir.shape[1]} samples)")
             
@@ -334,41 +321,6 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
             return {'CANCELLED'}
         
         return {'FINISHED'}
-
-    def _remove_direct_impulse(self, ir: np.ndarray, sample_rate: int) -> np.ndarray:
-        """Remove the direct impulse spike from IR to isolate reflections."""
-        
-        # Create a copy to avoid modifying original
-        ir_processed = ir.copy()
-        
-        # Use W channel (index 0) to detect the direct impulse in ambisonic signal
-        w_channel = ir[0, :]
-        
-        # Find the strongest early impulse (likely the direct path)
-        early_window_samples = int(0.1 * sample_rate)  # Search first 100ms
-        early_segment = np.abs(w_channel[:early_window_samples])
-        
-        if early_segment.size == 0:
-            self.report({'WARNING'}, "No early samples to analyze for direct removal")
-            return ir_processed
-            
-        direct_peak_idx = np.argmax(early_segment)
-        direct_peak_value = early_segment[direct_peak_idx]
-        
-        # Define impulse window around the peak to remove
-        impulse_half_width = max(16, int(0.001 * sample_rate))  # 1ms or 16 samples minimum
-        start_idx = max(0, direct_peak_idx - impulse_half_width)
-        end_idx = min(ir.shape[1], direct_peak_idx + impulse_half_width + 1)
-        
-        # Zero out the direct impulse in ALL channels (preserve ambisonic balance)
-        ir_processed[:, start_idx:end_idx] = 0.0
-        
-        # Report what was removed
-        direct_time_ms = (direct_peak_idx / sample_rate) * 1000.0
-        window_width_ms = ((end_idx - start_idx) / sample_rate) * 1000.0
-        self.report({'INFO'}, f"Direct impulse removed: peak at {direct_time_ms:.1f}ms, zeroed {window_width_ms:.1f}ms window")
-        
-        return ir_processed
 
     def _trace_new_hybrid(self, context, source_pos, receiver_pos, bvh, obj_map):
         """New hybrid workflow: separate forward/reverse processing with crossfading."""
@@ -395,21 +347,18 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
             
         # Step 2: Generate standard reverse tracer IR (same as when Reverse is selected)
         self.report({'INFO'}, "Generating reverse tracer IR...")
-        reverse_tracer = create_ray_tracer('REVERSE', config)
+        reverse_config = copy.deepcopy(config)
+        reverse_config.include_direct = False
+        reverse_tracer = create_ray_tracer('REVERSE', reverse_config)
         reverse_ir = reverse_tracer.trace_rays(source_pos, receiver_pos, bvh, obj_map, directions)
         
         if reverse_ir is None:
             self.report({'ERROR'}, "Reverse tracer failed")
             return None
             
-        # Step 1 & 2: Post-process both individually - remove direct and normalize each to 0dBFS
-        self.report({'INFO'}, "Post-processing individual IRs...")
-        
-        # Remove direct impulse from both (always applied)
-        forward_ir = self._remove_direct_impulse(forward_ir, config.sample_rate)
-        reverse_ir = self._remove_direct_impulse(reverse_ir, config.sample_rate)
-        
-        # Normalize each IR individually to 0 dBFS (per specification steps 1 & 2)
+        # Balance both components before applying the artistic hybrid controls.
+        self.report({'INFO'}, "Balancing forward and reverse IR components...")
+
         forward_peak = np.max(np.abs(forward_ir))
         if forward_peak > 1e-9:
             forward_ir = forward_ir / forward_peak
@@ -447,16 +396,9 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
         
         hybrid_ir = self._crossfade_hybrid_irs(forward_ir, reverse_ir, config.sample_rate, crossfade_start_ms, crossfade_length_ms, forward_final_level, reverse_final_level)
         
-        # Cache the processed forward and reverse IRs for re-mixing (before final normalization)
+        # Cache the processed forward and reverse IRs for re-mixing.
         _store_irs_in_cache(context, forward_ir, reverse_ir, config.sample_rate)
         self.report({'INFO'}, "Cached processed forward and reverse IRs for re-mixing")
-        
-        # Step 5: Final normalization and output (same as existing workflow)
-        final_peak = np.max(np.abs(hybrid_ir))
-        if final_peak > 1e-9:
-            final_scale = 1.0 / final_peak
-            hybrid_ir = hybrid_ir * final_scale
-            self.report({'INFO'}, f"Final normalization to 0 dBFS (scale: {final_scale:.6f})")
         
         return hybrid_ir
     
