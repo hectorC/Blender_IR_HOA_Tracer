@@ -9,7 +9,7 @@ A professional-grade physics-based ray tracer that simulates room acoustics by t
 ## 🎯 Key Features
 
 - **Hybrid ray tracing**: Intelligent combination of Forward + Reverse algorithms for optimal results  
-- **Professional materials system**: 8-band octave processing (125Hz-8kHz) with industry-standard presets
+- **Professional materials system**: 7-band octave processing (125Hz-8kHz) with practical starting-point presets
 - **Advanced blend controls**: ±24dB gain adjustment for fine-tuning acoustic character
 - **Fast Preview Mode**: Quick broadband calculations for rapid iteration
 - **Third-order ambisonic encoding**: 16-channel spatial audio with configurable orientation
@@ -117,7 +117,7 @@ subprocess.check_call([pybin, "-m", "pip", "install", "soundfile"])
 
 The materials system uses industry-standard octave bands for frequency-dependent acoustic modeling:
 
-**Frequency Bands**: 125Hz • 250Hz • 500Hz • 1kHz • 2kHz • 4kHz • 8kHz • 16kHz
+**Frequency Bands**: 125Hz • 250Hz • 500Hz • 1kHz • 2kHz • 4kHz • 8kHz
 
 Each material defines separate absorption and scattering coefficients per band, enabling realistic acoustic behavior across the full audio spectrum.
 
@@ -171,11 +171,11 @@ Each material defines separate absorption and scattering coefficients per band, 
 ## Parameter Reference
 
 ### Object Properties
-- **Material Preset**: Choose from 5 professional presets (Concrete, Carpet, Wood, Glass, Metal) with industry-standard 8-band values, or select "Custom" for manual control.
+- **Material Preset**: Choose from five starting-point presets (Wood, Concrete, Carpet, Tile, and Brick), or select "Custom" for manual 7-band control.
 - **Absorption**: Broadband energy absorption coefficient (0.0 = perfectly reflective, 1.0 = fully absorbent). Presets override this with frequency-dependent values.
 - **Scatter**: Fraction of reflected energy sent into diffuse (cosine) lobes instead of specular reflections (0.0 = perfect mirror, 1.0 = fully diffuse Lambert surface).
-- **Absorption Spectrum**: 8-band octave absorption values at centers: 125Hz, 250Hz, 500Hz, 1kHz, 2kHz, 4kHz, 8kHz, 16kHz. Essential for realistic acoustic modeling.
-- **Scatter Spectrum**: 8-band scattering values controlling diffuse/specular reflection balance per frequency. Higher values = more diffuse surface behavior.
+- **Absorption Spectrum**: 7-band octave absorption values at centers: 125Hz, 250Hz, 500Hz, 1kHz, 2kHz, 4kHz, and 8kHz. Essential for realistic acoustic modeling.
+- **Scatter Spectrum**: 7-band scattering values controlling diffuse/specular reflection balance per frequency. Higher values = more diffuse surface behavior.
 - **Transmission**: Energy fraction that transmits through the surface (0.0 = opaque wall, 1.0 = transparent). Useful for thin barriers and partial occlusion.
 - **Acoustic Source**: Marks sound emission point for Forward tracing and target for Reverse tracing rays.
 - **Acoustic Receiver**: Listener position where ambisonic impulse responses are captured using the configured receiver radius.
@@ -197,7 +197,7 @@ Each material defines separate absorption and scattering coefficients per band, 
 - **IR Length**: 0.1-30.0s impulse response duration. Should exceed expected RT60 (default: 3.0s).
 
 ### Performance Options
-- **Fast Preview Mode**: Bypasses 8-band processing for quick broadband calculations. Use for testing, disable for final renders.
+- **Fast Preview Mode**: Bypasses 7-band processing for quick broadband calculations. Use for testing, disable for final renders.
 - **WAV Format**: **32-bit Float** (recommended for IR), **24-bit PCM** (good quality), **16-bit PCM** (smallest files).
 
 ### Advanced Algorithm Settings
@@ -229,13 +229,13 @@ Each material defines separate absorption and scattering coefficients per band, 
 
 ### Performance Optimization
 **For Fast Iteration:**
-- **Fast Preview Mode**: ON (bypasses 8-band processing)
+- **Fast Preview Mode**: ON (bypasses 7-band processing)
 - **Rays**: 1000-2000 (quick noise assessment)  
 - **Passes**: 1-2 (minimal averaging)
 - **Tracing Mode**: Hybrid with default gains
 
 **For Production Quality:**
-- **Fast Preview Mode**: OFF (full 8-band processing)
+- **Fast Preview Mode**: OFF (full 7-band processing)
 - **Rays**: 8192-32768+ (smooth late reverberation)
 - **Passes**: 4-16 (statistical averaging)
 - **Russian Roulette**: Start=40, Survival=0.99 (optimized for quality)
@@ -293,7 +293,7 @@ When updating the add-on:
 
 ### Professional Quality Issues  
 - **Unrealistic acoustics**: Use **Material Presets** instead of manual values for physically accurate behavior
-- **Frequency imbalance**: Disable **Fast Preview Mode** to enable full 8-band processing  
+- **Frequency imbalance**: Disable **Fast Preview Mode** to enable full 7-band processing
 - **Poor spatial imaging**: Verify ambisonic **Yaw Offset** matches your decoder convention
 - **Inconsistent results**: Set **Random Seed** to non-zero value for reproducible renders
 
@@ -323,7 +323,7 @@ For batch processing: `blender -b scene.blend --python-expr "import bpy; bpy.ops
 
 This add-on provides production-ready acoustic simulation with industry-standard materials modeling, hybrid algorithms, and professional-grade controls. Perfect for architectural acoustics, game audio, film post-production, and acoustic research.
 
-**Latest version features hybrid ray tracing, 8-band frequency processing, and ±24dB blend controls for unprecedented acoustic realism.**
+**Latest version features hybrid ray tracing, 7-band frequency processing, and ±24dB blend controls for creative acoustic rendering.**
 
 
 

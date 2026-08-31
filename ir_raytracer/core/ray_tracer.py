@@ -10,7 +10,8 @@ from typing import List, Tuple, Optional, Any
 from abc import ABC, abstractmethod
 
 from .acoustics import (
-    MaterialProperties, air_attenuation_bands, design_band_kernel, 
+    MaterialProperties, air_attenuation_bands,
+    add_filtered_impulse as synthesize_filtered_impulse,
     NUM_BANDS
 )
 from .ambisonic import AmbisonicEncoder
@@ -165,23 +166,14 @@ class ImpulseResponseRenderer:
     def add_filtered_impulse(self, ambi_vec: np.ndarray, delay_samples: float, 
                            amplitude: float, band_profile: np.ndarray) -> bool:
         """Add a frequency-filtered impulse to the IR."""
-        kernel = design_band_kernel(band_profile, self.config.sample_rate)
-        base = int(np.floor(delay_samples))
-        frac = float(delay_samples - base)
-        
-        weights = ((base, 1.0 - frac), (base + 1, frac))
-        wrote = False
-        
-        for start, w in weights:
-            if w <= 0.0:
-                continue
-            for k, kv in enumerate(kernel):
-                idx = start + k
-                if 0 <= idx < self.ir.shape[1]:
-                    self.ir[:, idx] += ambi_vec * (amplitude * w * kv)
-                    wrote = True
-        
-        return wrote
+        return synthesize_filtered_impulse(
+            self.ir,
+            ambi_vec,
+            delay_samples,
+            amplitude,
+            band_profile,
+            self.config.sample_rate,
+        )
     
     def get_path_band_profile(self, band_amplitude: np.ndarray, distance_bu: float) -> np.ndarray:
         """Calculate frequency-dependent path attenuation."""

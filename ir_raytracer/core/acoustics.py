@@ -192,41 +192,66 @@ def air_attenuation_bands(distance_m: float, temp_c: float = 20.0,
 
 @lru_cache(maxsize=4096)
 def _band_kernel_cache(band_key: Tuple[float, ...], sr: int, kernel_len: int) -> np.ndarray:
-    """Cached frequency band kernel generation."""
-    band_profile = np.array(band_key, dtype=np.float32)
-    kernel_len = int(kernel_len)
+    """Generate a cached causal minimum-phase octave-band reconstruction FIR."""
+    band_profile = np.maximum(np.array(band_key, dtype=np.float64), 0.0)
+    kernel_len = max(16, int(kernel_len))
     sr = max(1000, int(sr))
-    
-    n_fft = max(64, 1 << int(np.ceil(np.log2(kernel_len * 4))))
-    freq_axis = np.linspace(0.0, sr * 0.5, n_fft // 2 + 1, dtype=np.float32)
-    
-    mags = np.empty_like(freq_axis)
-    mags[0] = float(band_profile[0])
-    
-    if freq_axis.shape[0] > 1:
-        log_freq = np.log10(np.maximum(freq_axis[1:], 1.0))
-        log_bands = np.log10(np.array(BAND_CENTERS_HZ, dtype=np.float32))
-        interp = np.interp(log_freq, log_bands, band_profile, 
-                          left=band_profile[0], right=band_profile[-1])
-        mags[1:] = interp
-    
-    mag_full = np.concatenate([mags, mags[-2:0:-1]])
-    ir = np.fft.irfft(mag_full, n=n_fft).real[:kernel_len]
-    
-    if kernel_len >= 4:
-        window = np.hanning(kernel_len * 2)[kernel_len:kernel_len * 2]
-        ir *= window
-    
-    s = float(np.sum(ir))
-    target_dc = mags[0]
-    if abs(s) > 1e-12:
-        ir *= target_dc / s
-    
-    return ir.astype(np.float32)
+    if not np.any(band_profile > 1e-12):
+        return np.zeros(kernel_len, dtype=np.float32)
+
+    n_fft = max(4096, 1 << int(np.ceil(np.log2(kernel_len * 8))))
+    frequency_axis = np.fft.rfftfreq(n_fft, d=1.0 / sr)
+    magnitudes = np.empty_like(frequency_axis)
+    magnitudes[0] = band_profile[0]
+    log_bands = np.log10(np.array(BAND_CENTERS_HZ, dtype=np.float64))
+    magnitudes[1:] = np.interp(
+        np.log10(np.maximum(frequency_axis[1:], 1.0)),
+        log_bands,
+        band_profile,
+        left=band_profile[0],
+        right=band_profile[-1],
+    )
+
+    # Real-cepstrum construction produces a causal minimum-phase filter with
+    # the requested magnitude response and no linear-phase pre-ringing.
+    log_magnitude = np.log(np.maximum(magnitudes, 1e-7))
+    cepstrum = np.fft.irfft(log_magnitude, n=n_fft)
+    minimum_phase_cepstrum = np.zeros(n_fft, dtype=np.float64)
+    minimum_phase_cepstrum[0] = cepstrum[0]
+    minimum_phase_cepstrum[1:n_fft // 2] = 2.0 * cepstrum[1:n_fft // 2]
+    minimum_phase_cepstrum[n_fft // 2] = cepstrum[n_fft // 2]
+    minimum_phase_spectrum = np.exp(
+        np.fft.rfft(minimum_phase_cepstrum, n=n_fft)
+    )
+    kernel = np.fft.irfft(minimum_phase_spectrum, n=n_fft)[:kernel_len]
+
+    # Fade only the final quarter to suppress truncation ripple while keeping
+    # the early minimum-phase energy and acoustic arrival time intact.
+    fade_start = (kernel_len * 3) // 4
+    fade_size = kernel_len - fade_start
+    if fade_size > 1:
+        kernel[fade_start:] *= 0.5 * (
+            1.0 + np.cos(np.linspace(0.0, pi, fade_size))
+        )
+
+    dc_sum = float(np.sum(kernel))
+    if abs(dc_sum) > 1e-12:
+        kernel *= float(magnitudes[0]) / dc_sum
+
+    return kernel.astype(np.float32)
 
 
-def design_band_kernel(band_profile: np.ndarray, sr: int, kernel_len: int = 16) -> np.ndarray:
-    """Design frequency-dependent filter kernel."""
+def _default_kernel_length(sr: int) -> int:
+    """Use roughly 10.7 ms of FIR at common production sample rates."""
+    return max(128, min(2048, int(round(max(1000, int(sr)) * 0.0106667))))
+
+
+def design_band_kernel(
+    band_profile: np.ndarray, sr: int, kernel_len: Optional[int] = None
+) -> np.ndarray:
+    """Design a causal minimum-phase frequency reconstruction filter."""
+    if kernel_len is None:
+        kernel_len = _default_kernel_length(sr)
     key = tuple(float(round(float(v), 5)) for v in band_profile)
     return _band_kernel_cache(key, int(sr), int(kernel_len))
 
@@ -241,14 +266,25 @@ def add_filtered_impulse(ir: np.ndarray, ambi_vec: np.ndarray, delay_samples: fl
     weights = ((base, 1.0 - frac), (base + 1, frac))
     wrote = False
     
-    for start, w in weights:
-        if w <= 0.0:
+    for start, weight in weights:
+        if weight <= 0.0:
             continue
-        for k, kv in enumerate(kernel):
-            idx = start + k
-            if 0 <= idx < ir.shape[1]:
-                ir[:, idx] += ambi_vec * (amplitude * w * kv)
-                wrote = True
+        source_start = max(0, -start)
+        destination_start = max(0, start)
+        count = min(
+            kernel.shape[0] - source_start,
+            ir.shape[1] - destination_start,
+        )
+        if count <= 0:
+            continue
+        destination = slice(destination_start, destination_start + count)
+        source = slice(source_start, source_start + count)
+        ir[:, destination] += (
+            ambi_vec[:, None]
+            * (amplitude * weight)
+            * kernel[None, source]
+        )
+        wrote = True
     
     return wrote
 
