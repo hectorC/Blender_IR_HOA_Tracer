@@ -28,6 +28,11 @@ def _context(unit_scale: float = 1.0):
     return SimpleNamespace(scene=scene)
 
 
+class BlockedBVH:
+    def ray_cast(self, origin, direction):
+        return origin + direction * 0.5, Vector((1.0, 0.0, 0.0)), 0, 0.5
+
+
 class DirectCalibrationTests(unittest.TestCase):
     source = Vector((0.0, 0.0, 0.0))
     receiver = Vector((1.0, 0.0, 0.0))
@@ -64,6 +69,29 @@ class DirectCalibrationTests(unittest.TestCase):
         self.assertTrue(applied)
         self.assertAlmostEqual(float(calibrated[0, direct_sample]), 0.5, places=6)
         self.assertAlmostEqual(float(calibrated[0, 5000]), 0.2, places=6)
+
+    def test_blocked_line_of_sight_rejects_nearby_diffraction_arrival(self):
+        context = _context()
+        ir = np.zeros((16, 12000), dtype=np.float32)
+        direct_sample = int(round(
+            (self.receiver - self.source).length
+            / speed_of_sound_bu(context)
+            * context.scene.airt_sr
+        ))
+        ir[0, direct_sample + 4] = 0.25
+        original = ir.copy()
+
+        calibrated, message, applied = calibrate_direct_1_over_r(
+            ir,
+            context,
+            self.source,
+            self.receiver,
+            BlockedBVH(),
+        )
+
+        self.assertFalse(applied)
+        self.assertIn("line of sight is blocked", message)
+        np.testing.assert_array_equal(calibrated, original)
 
 
 if __name__ == "__main__":

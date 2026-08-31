@@ -36,9 +36,10 @@ else:
     sf = None
 
 try:
-    from ..core.ray_tracer import trace_impulse_response
+    from ..core.ray_tracer import RayTracingConfig, trace_impulse_response
     HAVE_TRACER = True
 except ImportError:
+    RayTracingConfig = None
     HAVE_TRACER = False
 
 # Cache management utilities
@@ -156,18 +157,23 @@ def _invalidate_cache(context):
 
 
 try:
-    from ..core.ray_tracer import trace_impulse_response
+    from ..core.ray_tracer import RayTracingConfig, trace_impulse_response
     from ..utils.scene_utils import build_bvh, get_scene_sources, get_scene_receivers, get_writable_path
 except ImportError:
     # Fallback for development/testing
     trace_impulse_response = None
+    RayTracingConfig = None
     build_bvh = get_scene_sources = get_scene_receivers = get_writable_path = None
 
 
-def calibrate_direct_1_over_r(ir: np.ndarray, context, source, receiver):
+def calibrate_direct_1_over_r(ir: np.ndarray, context, source, receiver, bvh=None):
     """Scale the IR so the measured direct W amplitude matches 1/distance."""
     try:
-        from ..utils.scene_utils import get_scene_unit_scale, speed_of_sound_bu
+        from ..utils.scene_utils import (
+            get_scene_unit_scale,
+            los_clear,
+            speed_of_sound_bu,
+        )
         
         sr = int(context.scene.airt_sr)
         c = speed_of_sound_bu(context)
@@ -176,6 +182,9 @@ def calibrate_direct_1_over_r(ir: np.ndarray, context, source, receiver):
         
         if dist_bu <= 1e-9 or dist_m <= 1e-9 or ir.shape[1] <= 22:
             return ir, "Calibrate: skipped (zero distance or IR too short)", False
+
+        if bvh is not None and not los_clear(source, receiver, bvh):
+            return ir, "Calibrate: skipped (direct line of sight is blocked)", False
         
         delay = (dist_bu / c) * sr
         n = int(round(delay))
@@ -242,6 +251,9 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
         # Perform multiple passes with averaging
         passes = max(1, int(scene.airt_passes))
         ir = None
+        # Reuse the immutable render configuration and diffraction edge index
+        # across averaging passes.
+        render_config = RayTracingConfig(context)
         
         self.report({'INFO'}, f"Starting {passes} render pass(es)...")
         
@@ -258,10 +270,19 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
             
             # NEW HYBRID WORKFLOW: Handle hybrid differently
             if scene.airt_trace_mode == 'HYBRID':
-                ir_pass = self._trace_new_hybrid(context, source, receiver, bvh, obj_map)
+                ir_pass = self._trace_new_hybrid(
+                    context, source, receiver, bvh, obj_map, render_config
+                )
             else:
                 # Standard single-method tracing
-                ir_pass = trace_impulse_response(context, source, receiver, bvh, obj_map)
+                ir_pass = trace_impulse_response(
+                    context,
+                    source,
+                    receiver,
+                    bvh,
+                    obj_map,
+                    config=render_config,
+                )
             
             
             # Accumulate results with float64 precision to avoid rounding errors
@@ -282,7 +303,7 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
         
         if should_calibrate:
             ir, cal_info, calibration_applied = calibrate_direct_1_over_r(
-                ir, context, source, receiver
+                ir, context, source, receiver, bvh
             )
             self.report({'INFO'}, cal_info)
         
@@ -322,7 +343,9 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
         
         return {'FINISHED'}
 
-    def _trace_new_hybrid(self, context, source_pos, receiver_pos, bvh, obj_map):
+    def _trace_new_hybrid(
+        self, context, source_pos, receiver_pos, bvh, obj_map, config=None
+    ):
         """New hybrid workflow: separate forward/reverse processing with crossfading."""
         try:
             from ..core.ray_tracer import create_ray_tracer, RayTracingConfig, generate_ray_directions
@@ -331,7 +354,8 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
             return None
             
         # Get rendering parameters from context (same as existing trace_impulse_response)
-        config = RayTracingConfig(context)
+        if config is None:
+            config = RayTracingConfig(context)
         directions = generate_ray_directions(config.num_rays)
 
         # source_pos and receiver_pos are already mathutils.Vector objects from get_scene_sources/receivers
@@ -347,8 +371,9 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
             
         # Step 2: Generate standard reverse tracer IR (same as when Reverse is selected)
         self.report({'INFO'}, "Generating reverse tracer IR...")
-        reverse_config = copy.deepcopy(config)
+        reverse_config = copy.copy(config)
         reverse_config.include_direct = False
+        reverse_config.include_primary_diffraction = False
         reverse_tracer = create_ray_tracer('REVERSE', reverse_config)
         reverse_ir = reverse_tracer.trace_rays(source_pos, receiver_pos, bvh, obj_map, directions)
         
@@ -406,11 +431,6 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
         crossfade_start_samples = max(0, min(crossfade_start_samples, min_length - 1))
         crossfade_end_samples = max(crossfade_start_samples + 1, min(crossfade_end_samples, min_length))
         
-        # Debug info: print the calculated sample positions
-        print(f"DEBUG Crossfade: start_ms={crossfade_start_ms}, length_ms={crossfade_length_ms}, final_level={forward_final_level}")
-        print(f"DEBUG Samples: start={crossfade_start_samples}, end={crossfade_end_samples}, total_length={min_length}")
-        print(f"DEBUG Times: start_time={crossfade_start_samples/sample_rate:.3f}s, end_time={crossfade_end_samples/sample_rate:.3f}s")
-        
         # Create weight arrays
         forward_weight = np.ones(min_length)
         reverse_weight = np.ones(min_length)
@@ -433,16 +453,6 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
         # Late period: each tracer at its independent final level
         forward_weight[crossfade_end_samples:] = forward_final_level
         reverse_weight[crossfade_end_samples:] = reverse_final_level
-        
-        # Debug: show weight values at key sample points
-        key_samples = [0, crossfade_start_samples, 
-                      int((crossfade_start_samples + crossfade_end_samples) / 2),  # midpoint
-                      crossfade_end_samples, min_length - 1]
-        print("DEBUG Weight values at key times:")
-        for sample_idx in key_samples:
-            if sample_idx < min_length:
-                time_s = sample_idx / sample_rate
-                print(f"  {time_s:.3f}s (sample {sample_idx}): forward={forward_weight[sample_idx]:.3f}, reverse={reverse_weight[sample_idx]:.3f}")
         
         # Apply weights and combine (both IRs are time-aligned from their common time=0)
         hybrid_ir = (forward_ir * forward_weight[None, :] + 

@@ -364,10 +364,10 @@ class AIRT_PT_AdvancedPanel(bpy.types.Panel):
             warning_box.label(text="⚠ Forward tracing needs Segment Capture!", icon='ERROR')
         
         # Diffraction modeling
-        box.prop(scene, "airt_enable_diffraction", text="Edge Diffraction")
+        box.prop(scene, "airt_enable_diffraction", text="Edge Diffraction (Approx.)")
         if scene.airt_enable_diffraction:
             sub = box.column()
-            sub.prop(scene, "airt_diffraction_samples", text="Samples")
+            sub.prop(scene, "airt_diffraction_samples", text="Max Paths")
             sub.prop(scene, "airt_diffraction_max_deg", text="Max Angle (°)")
         
         # Air absorption modeling

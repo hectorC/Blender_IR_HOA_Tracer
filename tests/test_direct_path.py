@@ -36,7 +36,12 @@ class EmptyBVH:
 class DirectPathConfig:
     """Minimal deterministic config accepted by both tracer implementations."""
 
-    def __init__(self, include_direct: bool, segment_capture: bool = True):
+    def __init__(
+        self,
+        include_direct: bool,
+        segment_capture: bool = True,
+        enable_diffraction: bool = False,
+    ):
         self.num_rays = 1
         self.max_bounces = 0
         self.sample_rate = 48000
@@ -51,9 +56,11 @@ class DirectPathConfig:
         self.rr_enable = False
         self.rr_start_bounce = 40
         self.rr_survive_prob = 0.99
-        self.enable_diffraction = False
+        self.enable_diffraction = enable_diffraction
         self.diffraction_samples = 0
         self.diffraction_max_angle = 0.0
+        self.diffraction_edge_index = None
+        self.include_primary_diffraction = True
         self.air_enable = False
         self.air_temp_c = 20.0
         self.air_humidity = 50.0
@@ -90,6 +97,20 @@ class DirectPathTests(unittest.TestCase):
 
     def test_forward_reverb_only_suppresses_zero_bounce_capture(self):
         ir = self._trace(ForwardRayTracer, include_direct=False)
+        np.testing.assert_array_equal(ir, np.zeros_like(ir))
+
+    def test_reverb_only_does_not_restore_visible_direct_when_diffraction_is_enabled(self):
+        tracer = ForwardRayTracer(DirectPathConfig(
+            include_direct=False,
+            enable_diffraction=True,
+        ))
+        ir = tracer.trace_rays(
+            self.source,
+            self.receiver,
+            EmptyBVH(),
+            [],
+            self.direct_direction,
+        )
         np.testing.assert_array_equal(ir, np.zeros_like(ir))
 
     def test_reverse_full_ir_contains_direct_arrival_exactly_once(self):

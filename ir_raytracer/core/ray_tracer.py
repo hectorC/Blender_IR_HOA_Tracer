@@ -15,6 +15,7 @@ from .acoustics import (
     NUM_BANDS
 )
 from .ambisonic import AmbisonicEncoder
+from .diffraction import find_diffraction_paths, maekawa_diffraction_gains
 from ..utils.math_utils import (
     reflect, cosine_weighted_hemisphere, jitter_specular_direction,
     segment_hits_sphere, generate_ray_directions
@@ -25,7 +26,7 @@ from ..utils.scene_utils import speed_of_sound_bu, get_scene_unit_scale
 class RayTracingConfig:
     """Configuration for ray tracing parameters."""
     
-    def __init__(self, context):
+    def __init__(self, context, diffraction_edge_index=None):
         """Initialize from Blender scene context."""
         scene = context.scene
         
@@ -55,6 +56,19 @@ class RayTracingConfig:
         self.enable_diffraction = bool(getattr(scene, 'airt_enable_diffraction', False))
         self.diffraction_samples = int(getattr(scene, 'airt_diffraction_samples', 0))
         self.diffraction_max_angle = max(0.0, float(getattr(scene, 'airt_diffraction_max_deg', 40.0))) * pi / 180.0
+        self.include_primary_diffraction = True
+        self.diffraction_edge_index = diffraction_edge_index
+        if self.enable_diffraction and self.diffraction_samples > 0:
+            try:
+                if self.diffraction_edge_index is None:
+                    from .diffraction import build_diffraction_edge_index
+                    self.diffraction_edge_index = build_diffraction_edge_index(context)
+                print(
+                    "Diffraction: indexed "
+                    f"{len(self.diffraction_edge_index.edges)} sharp/boundary edges"
+                )
+            except Exception as error:
+                print(f"Diffraction: edge indexing disabled ({error})")
         
         # Air absorption
         self.air_enable = bool(getattr(scene, 'airt_air_enable', True))
@@ -344,6 +358,63 @@ class ImpulseResponseRenderer:
             throughput * material.specular_amplitude / probability,
         )
 
+    def _find_diffraction_paths(
+        self,
+        origin: mathutils.Vector,
+        receiver: mathutils.Vector,
+        bvh,
+    ):
+        edge_index = getattr(self.config, 'diffraction_edge_index', None)
+        if (
+            not self.config.enable_diffraction
+            or self.config.diffraction_samples <= 0
+            or edge_index is None
+        ):
+            return []
+        return find_diffraction_paths(
+            origin,
+            receiver,
+            edge_index,
+            bvh,
+            self.config.unit_scale,
+            self.config.diffraction_max_angle,
+            self.config.diffraction_samples,
+            self.config.eps,
+        )
+
+    def _emit_primary_diffraction(
+        self,
+        origin: mathutils.Vector,
+        receiver: mathutils.Vector,
+        bvh,
+        throughput: np.ndarray,
+    ) -> bool:
+        """Emit source/receiver shadow paths around visible scene edges."""
+        paths = self._find_diffraction_paths(origin, receiver, bvh)
+        if not paths:
+            return False
+
+        wrote = False
+        path_weight = 1.0 / float(len(paths))
+        speed_of_sound_ms = self.config.speed_of_sound * self.config.unit_scale
+        for path in paths:
+            gains = maekawa_diffraction_gains(
+                path.path_difference_m,
+                speed_of_sound_ms,
+                path.bend_angle_rad,
+                self.config.diffraction_max_angle,
+            )
+            incoming = (path.point - receiver).normalized()
+            if self.emit_impulse(
+                throughput * gains * path_weight,
+                path.distance_bu,
+                incoming,
+                self._geometric_spreading(path.distance_bu),
+            ):
+                wrote = True
+        self.wrote_any = self.wrote_any or wrote
+        return wrote
+
 
 class ForwardRayTracer(ImpulseResponseRenderer):
     """Forward ray tracer (source to receiver)."""
@@ -362,7 +433,7 @@ class ForwardRayTracer(ImpulseResponseRenderer):
         per_ray_throughput = np.ones(NUM_BANDS, dtype=np.float32) / float(num_dirs)
         band_one = np.ones(NUM_BANDS, dtype=np.float32)
         
-        print(f"DEBUG: ForwardRayTracer starting with {num_dirs} directions")
+        print(f"Forward tracing: {num_dirs} rays")
         
         # Stochastic rays sample the reflected field. The zero-bounce path is
         # evaluated separately so its level does not depend on ray count.
@@ -370,8 +441,10 @@ class ForwardRayTracer(ImpulseResponseRenderer):
             self._trace_single_ray(mathutils.Vector(d), source, receiver, 
                                  bvh, obj_map, per_ray_throughput)
         
-        if self.config.include_direct:
-            print("DEBUG: Adding deterministic direct path (forward tracer)...")
+        if self.config.include_direct or (
+            self.config.enable_diffraction
+            and getattr(self.config, 'include_primary_diffraction', True)
+        ):
             self._add_direct_path(source, receiver, bvh, band_one)
         
         return self.ir
@@ -421,7 +494,7 @@ class ForwardRayTracer(ImpulseResponseRenderer):
             
             # Direct connection to receiver
             self._check_direct_connection(hit_point, normal, dirn, receiver, 
-                                        throughput, material, total_distance, bvh)
+                                        throughput, material, total_distance, bvh, bounce)
             
             # Continue ray
             new_direction, new_throughput = self._scatter_ray(dirn, normal, material, throughput)
@@ -459,18 +532,13 @@ class ForwardRayTracer(ImpulseResponseRenderer):
         
         amplitude_scalar = self._geometric_spreading(total_dist)
         
-        # Add debug output for segment capture
-        delay_ms = (total_dist / self.config.speed_of_sound) * 1000.0
-        if delay_ms < 100.0:  # Only log early reflections to avoid spam
-            print(f"DEBUG: Segment capture - delay: {delay_ms:.2f}ms, distance: {total_dist:.2f}m, amplitude_scalar: {amplitude_scalar:.6f}")
-        
         if self.emit_impulse(throughput, total_dist, incoming, amplitude_scalar):
             self.wrote_any = True
     
     def _check_direct_connection(self, hit_point: mathutils.Vector, normal: mathutils.Vector,
                                direction: mathutils.Vector, receiver: mathutils.Vector,
                                throughput: np.ndarray, material: MaterialProperties,
-                               path_length: float, bvh):
+                               path_length: float, bvh, bounce: int):
         """Check for direct connection from hit point to receiver."""
         from ..utils.scene_utils import los_clear
         
@@ -482,9 +550,12 @@ class ForwardRayTracer(ImpulseResponseRenderer):
         
         has_los = los_clear(hit_point + normal * self.config.eps, receiver, bvh, self.config.eps)
         if not has_los:
-            # Try diffraction
-            self._add_diffraction(hit_point, normal, direction, to_receiver, 
-                                throughput, material, path_length)
+            # Keep the optional edge search bounded: primary diffraction is
+            # deterministic, while reflected diffraction is limited to the
+            # first surface interaction.
+            if bounce == 0:
+                self._add_diffraction(hit_point, normal, direction, to_receiver,
+                                    throughput, material, path_length, bvh)
             return
         
         to_receiver_dir = to_receiver.normalized()
@@ -513,39 +584,64 @@ class ForwardRayTracer(ImpulseResponseRenderer):
         
         direction_vec = receiver - source
         distance = direction_vec.length
-        print(f"DEBUG: Direct path distance: {distance:.3f}m")
         
         if not los_clear(source, receiver, bvh):
-            print("DEBUG: Direct path blocked by geometry")
+            if getattr(self.config, 'include_primary_diffraction', True):
+                self._emit_primary_diffraction(source, receiver, bvh, throughput)
             return
         
         if distance <= 0.0:
-            print("DEBUG: Direct path distance too small")
+            return
+
+        if not self.config.include_direct:
             return
         
         incoming = (source - receiver).normalized()
         amplitude_scalar = self._geometric_spreading(distance)
-        delay_ms = (distance / self.config.speed_of_sound) * 1000.0
-        
-        print(f"DEBUG: Direct path - delay: {delay_ms:.2f}ms, amplitude_scalar: {amplitude_scalar:.6f}")
-        print(f"DEBUG: Direct path throughput: {np.mean(throughput):.6f}")
         
         if self.emit_impulse(throughput, distance, incoming, amplitude_scalar):
-            print("DEBUG: Direct path impulse successfully added")
             self.wrote_any = True
-        else:
-            print("DEBUG: Direct path impulse failed to add")
     
     def _add_diffraction(self, hit_point: mathutils.Vector, normal: mathutils.Vector,
                         direction: mathutils.Vector, to_receiver: mathutils.Vector,
-                        throughput: np.ndarray, material: MaterialProperties, path_length: float):
-        """Add simple diffraction sampling."""
+                        throughput: np.ndarray, material: MaterialProperties,
+                        path_length: float, bvh):
+        """Add bounded single-edge diffraction for a blocked reflection path."""
         if not self.config.enable_diffraction or self.config.diffraction_samples <= 0:
             return
-        
-        # Implementation would be similar to original but extracted here
-        # For brevity, I'll add a simplified version
-        pass
+
+        receiver = hit_point + to_receiver
+        paths = self._find_diffraction_paths(hit_point, receiver, bvh)
+        if not paths:
+            return
+
+        path_weight = 1.0 / float(len(paths))
+        speed_of_sound_ms = self.config.speed_of_sound * self.config.unit_scale
+        for path in paths:
+            outgoing = (path.point - hit_point).normalized()
+            reflection_profile = self._reflection_connection_profile(
+                direction, normal, outgoing, material
+            )
+            if not np.any(reflection_profile > 1e-8):
+                continue
+            diffraction_gains = maekawa_diffraction_gains(
+                path.path_difference_m,
+                speed_of_sound_ms,
+                path.bend_angle_rad,
+                self.config.diffraction_max_angle,
+            )
+            total_distance = path_length + path.distance_bu
+            incoming = (path.point - receiver).normalized()
+            if self.emit_impulse(
+                throughput
+                * reflection_profile
+                * diffraction_gains
+                * path_weight,
+                total_distance,
+                incoming,
+                self._geometric_spreading(total_distance),
+            ):
+                self.wrote_any = True
     
     def _should_terminate_ray(self, bounce: int, throughput: np.ndarray) -> bool:
         """Determine if ray should be terminated."""
@@ -573,40 +669,7 @@ class ReverseRayTracer(ImpulseResponseRenderer):
         per_ray_throughput = np.ones(NUM_BANDS, dtype=np.float32) / float(num_dirs)
         band_one = np.ones(NUM_BANDS, dtype=np.float32)
         
-        print(f"DEBUG: ReverseRayTracer starting with {num_dirs} directions")
-        
-        # DEBUG: Print all configuration settings
-        print("DEBUG: RAY TRACING CONFIGURATION:")
-        print(f"  Basic Parameters:")
-        print(f"    Number of rays: {self.config.num_rays}")
-        print(f"    Max bounces: {self.config.max_bounces}")
-        print(f"    Sample rate: {self.config.sample_rate} Hz")
-        print(f"    IR length: {self.config.ir_length_samples} samples ({self.config.ir_length_samples/self.config.sample_rate:.2f}s)")
-        print(f"  Physical Parameters:")
-        print(f"    Speed of sound: {self.config.speed_of_sound:.1f} m/s")
-        print(f"    Unit scale: {self.config.unit_scale:.6f}")
-        print(f"    Receiver radius: {self.config.receiver_radius_m:.4f}m (scaled: {self.config.receiver_radius:.6f})")
-        print(f"  Ray Tracing Behavior:")
-        print(f"    Angle tolerance: {self.config.angle_tolerance_rad*180/pi:.1f}°")
-        print(f"    Specular roughness: {self.config.specular_roughness_rad*180/pi:.1f}°")
-        print(f"    Segment capture: {self.config.segment_capture}")
-        print(f"    Min throughput: {self.config.min_throughput:.0e}")
-        print(f"  Russian Roulette:")
-        print(f"    Enabled: {self.config.rr_enable}")
-        print(f"    Start bounce: {self.config.rr_start_bounce}")
-        print(f"    Survive probability: {self.config.rr_survive_prob:.3f}")
-        print(f"  Air Absorption:")
-        print(f"    Enabled: {self.config.air_enable}")
-        print(f"    Temperature: {self.config.air_temp_c:.1f}°C")
-        print(f"    Humidity: {self.config.air_humidity:.1f}%")
-        print(f"    Pressure: {self.config.air_pressure_kpa:.1f} kPa")
-        print(f"  Advanced Settings:")
-        print(f"    Quick broadband: {self.config.quick_broadband}")
-        if hasattr(self.config, 'hybrid_forward_gain_db'):
-            print(f"    Hybrid forward gain: {self.config.hybrid_forward_gain_db:.1f} dB")
-        print("DEBUG: End configuration")
-        print()
-        print(f"DEBUG: This is REVERSE ray tracing - should have strong absorption for carpet!")
+        print(f"Reverse tracing: {num_dirs} rays")
         
         rays_traced = 0
         for d in directions:
@@ -615,22 +678,16 @@ class ReverseRayTracer(ImpulseResponseRenderer):
                                  per_ray_throughput, first_direction)
             rays_traced += 1
         
-        if self.config.include_direct:
-            print("DEBUG: Adding deterministic direct path (reverse tracer)...")
+        if self.config.include_direct or (
+            self.config.enable_diffraction
+            and getattr(self.config, 'include_primary_diffraction', True)
+        ):
             self._add_direct_path(source, receiver, bvh, band_one)
         
-        print(f"DEBUG: Reverse tracer completed {rays_traced} rays")
-        if hasattr(self, 'connection_count'):
-            print(f"DEBUG: Total successful connections: {self.connection_count}")
-            
-            # DEBUG: Print final bounce statistics
-            if hasattr(self, 'bounce_stats'):
-                print(f"DEBUG: Final bounce distribution:")
-                total_attempts = sum(self.bounce_stats.values())
-                for b in sorted(self.bounce_stats.keys()):
-                    percentage = (self.bounce_stats[b] / total_attempts) * 100
-                    print(f"  Bounce {b}: {self.bounce_stats[b]} attempts ({percentage:.1f}%)")
-                print(f"DEBUG: Average bounces per ray: {sum(b*count for b,count in self.bounce_stats.items()) / total_attempts:.1f}")
+        print(
+            f"Reverse tracing complete: {rays_traced} rays, "
+            f"{getattr(self, 'connection_count', 0)} source connections"
+        )
         
         return self.ir
     
@@ -645,13 +702,6 @@ class ReverseRayTracer(ImpulseResponseRenderer):
         bounce = 0
         
         while bounce < self.config.max_bounces:
-            # DEBUG: Track bounce statistics
-            if not hasattr(self, 'bounce_stats'):
-                self.bounce_stats = {}
-            if bounce not in self.bounce_stats:
-                self.bounce_stats[bounce] = 0
-            self.bounce_stats[bounce] += 1
-            
             # Cast ray to find next surface hit
             hit, hit_point, normal, face_index = self._cast_ray(pos, dirn, bvh)
             
@@ -665,18 +715,6 @@ class ReverseRayTracer(ImpulseResponseRenderer):
             
             # Get material properties
             material = self._get_material_properties(face_index, obj_map)
-            
-            # DEBUG: Print material properties for early bounces
-            if bounce < 3 and random.random() < 0.001:  # Debug 0.1% of early bounces
-                print(f"DEBUG Material bounce {bounce}:")
-                print(f"  Absorption: {material.absorption_spectrum}")
-                print(f"  Scatter: {material.scatter_spectrum}")  
-                print(f"  Reflection: {material.reflection_spectrum}")
-                print(f"  Diffuse ampl: {material.diffuse_amplitude}")
-                print(f"  Specular ampl: {material.specular_amplitude}")
-                avg_abs = np.mean(material.absorption_spectrum)
-                avg_refl_ampl = np.mean(material.reflection_amplitude)
-                print(f"  Avg absorption: {avg_abs:.3f}, Avg refl_ampl: {avg_refl_ampl:.3f}")
             
             # Connect this reflected path back to the source when visible.
             self._check_source_connection(hit_point, normal, target, throughput, 
@@ -692,8 +730,6 @@ class ReverseRayTracer(ImpulseResponseRenderer):
             
             # Standard energy threshold check - no special treatment for absorptive materials
             if np.max(throughput) < self.config.min_throughput:
-                if bounce < 2 and random.random() < 0.001:
-                    print(f"DEBUG: Standard ray termination - energy: {np.max(throughput):.2e}, threshold: {self.config.min_throughput:.2e}")
                 break
                 
             # Update for next iteration
@@ -756,12 +792,17 @@ class ReverseRayTracer(ImpulseResponseRenderer):
         from ..utils.scene_utils import los_clear
         
         if not los_clear(source, receiver, bvh):
+            if getattr(self.config, 'include_primary_diffraction', True):
+                self._emit_primary_diffraction(source, receiver, bvh, throughput)
             return
         
         direction_vec = receiver - source
         distance = direction_vec.length
         
         if distance <= 0.0:
+            return
+
+        if not self.config.include_direct:
             return
         
         incoming = (source - receiver).normalized()
@@ -783,9 +824,11 @@ def create_ray_tracer(tracing_mode: str, config: RayTracingConfig) -> ImpulseRes
 
 def trace_impulse_response(context, source: mathutils.Vector, receiver: mathutils.Vector,
                           bvh, obj_map: List[Any], 
-                          directions: Optional[List[Tuple[float, float, float]]] = None) -> np.ndarray:
+                          directions: Optional[List[Tuple[float, float, float]]] = None,
+                          config: Optional[RayTracingConfig] = None) -> np.ndarray:
     """Main entry point for impulse response tracing using hybrid approach."""
-    config = RayTracingConfig(context)
+    if config is None:
+        config = RayTracingConfig(context)
     
     if directions is None:
         directions = generate_ray_directions(config.num_rays)
@@ -794,8 +837,8 @@ def trace_impulse_response(context, source: mathutils.Vector, receiver: mathutil
     user_trace_mode = context.scene.airt_trace_mode
     
     if user_trace_mode == 'HYBRID':
-        # Professional hybrid approach: combine both methods
-        print(f"Hybrid tracing: combining Forward (early) + Reverse (late) for optimal results")
+        # Hybrid approach: combine both methods.
+        print("Hybrid tracing: Forward early field + Reverse late field")
         return _trace_hybrid(config, source, receiver, bvh, obj_map, directions)
         
     else:
@@ -823,8 +866,9 @@ def _trace_hybrid(config: RayTracingConfig, source: mathutils.Vector, receiver: 
     # Reverse tracing contributes only the diffuse tail in hybrid mode. This
     # avoids adding the same deterministic direct path twice.
     import copy
-    config_late = copy.deepcopy(config)  # Create copy for late reverb
+    config_late = copy.copy(config)  # Share immutable scene acceleration data
     config_late.include_direct = False
+    config_late.include_primary_diffraction = False
     reverse_tracer = create_ray_tracer('REVERSE', config_late)
     ir_late = reverse_tracer.trace_rays(source, receiver, bvh, obj_map, late_rays)
     
@@ -867,8 +911,6 @@ def _blend_early_late(ir_early: np.ndarray, ir_late: np.ndarray, config: RayTrac
         reverse_scale = 0.3
     reverse_scale = float(np.clip(reverse_scale, 0.2, 2.0))
     ir_late_scaled = ir_late * reverse_scale
-    print(f"  DEBUG: Overlap RMS - Fwd: {fwd_rms_overlap:.6e}, Rev: {rev_rms_overlap:.6e}, RevScale: {reverse_scale:.3f}")
-
     # --- 3. Estimate RT60 (fallback if not measurable) for adaptive forward tail ---
     # Rough early slope: use 0.1-0.4 s window if energy present
     def estimate_rt60(ir: np.ndarray) -> float:
@@ -931,7 +973,6 @@ def _blend_early_late(ir_early: np.ndarray, ir_late: np.ndarray, config: RayTrac
         t_rel = time_axis[late_mask] - late_release_start
         current = forward_weight[late_mask]
         forward_weight[late_mask] = late_floor_min + (current - late_floor_min) * np.exp(-t_rel / max(tau_rel, 1e-6))
-        print(f"  DEBUG: Late forward release applied (start={late_release_start:.2f}s, final_floor={late_floor_min:.2f})")
 
     # Reverse weight is complementary (not forced perfectly complementary early for slight energy freedom)
     reverse_weight = 1.0 - forward_weight
@@ -944,9 +985,6 @@ def _blend_early_late(ir_early: np.ndarray, ir_late: np.ndarray, config: RayTrac
     if np.any(excess_mask):
         forward_weight[excess_mask] /= total_weight[excess_mask]
         reverse_weight[excess_mask] /= total_weight[excess_mask]
-        print("  DEBUG: Weight normalization applied to prevent >1.05 sum")
-
-    print(f"  DEBUG: Weights - fwd_tail_mean={np.mean(forward_weight[tail_mask]) if np.any(tail_mask) else 0:.3f}, rt60_guess={rt60_guess:.2f}, tau_f={tau_f:.2f}")
 
     # --- 5. Combine with user gains ---
     ir_combined = np.zeros_like(ir_early)
@@ -961,14 +999,5 @@ def _blend_early_late(ir_early: np.ndarray, ir_late: np.ndarray, config: RayTrac
     if peak_before > 0.9:
         scale = 0.9 / peak_before
         ir_combined *= scale
-        print(f"  DEBUG: Output scaled {scale:.3f} to keep headroom")
-
-    # Basic energy distribution logging
-    early_samp = int(0.1 * sr)
-    mid_samp = int(0.5 * sr)
-    e_early = float(np.sum(ir_combined[:, :early_samp] ** 2))
-    e_mid = float(np.sum(ir_combined[:, early_samp:mid_samp] ** 2))
-    e_late = float(np.sum(ir_combined[:, mid_samp:] ** 2))
-    print(f"  DEBUG: Energy blocks - early={e_early:.3e} mid={e_mid:.3e} late={e_late:.3e}")
 
     return ir_combined

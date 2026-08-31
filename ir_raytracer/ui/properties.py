@@ -433,19 +433,22 @@ def register_acoustic_props():
     )
     
     scene.airt_enable_diffraction = bpy.props.BoolProperty(
-        name="Enable diffraction", 
-        default=True
+        name="Enable diffraction",
+        description="Add an optional artistic single-edge shadow approximation around sharp and boundary mesh edges",
+        default=False
     )
     
     scene.airt_diffraction_samples = bpy.props.IntProperty(
-        name="Diffraction samples", 
+        name="Diffraction paths",
+        description="Maximum nearby visible edge paths averaged for each blocked connection",
         default=6, 
         min=0, 
         max=64
     )
     
     scene.airt_diffraction_max_deg = bpy.props.FloatProperty(
-        name="Diffraction max angle", 
+        name="Diffraction max angle",
+        description="Reject edge detours that bend more sharply than this angle",
         default=45.0, 
         min=0.0, 
         max=90.0
