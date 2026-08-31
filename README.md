@@ -208,7 +208,7 @@ Each material defines separate absorption and scattering coefficients per band, 
 - **Flip Z (up/down)**: Inverts the ambisonic Z axis (useful for matching systems that assume left-handed coordinates).
 - **IR Content**: **Full IR** emits one deterministic line-of-sight direct arrival plus room reflections. **Reverb Only** suppresses the direct arrival during tracing, without deleting an arbitrary early-time window, so the dry signal can be routed separately.
 - **Calibrate Direct (1/r)**: In Full IR mode, scales the entire impulse response so the direct-path W-channel amplitude matches 1/distance. The calibrated level is preserved in 32-bit float output instead of being cancelled by peak normalization.
-- **Air Absorption (freq)**: Enables ISO 9613-1 based air absorption filtering per path length.
+- **Air Absorption (freq)**: Enables [ISO 9613-1](https://www.iso.org/standard/17426.html) atmospheric attenuation using frequency, temperature, relative humidity, pressure, and the full propagation path length.
 - **Air Temp (deg C)**: Air temperature used in the absorption model.
 - **Rel Humidity (%)**: Relative humidity percentage for the absorption model.
 - **Air Pressure (kPa)**: Barometric pressure in kilopascals for the absorption model.

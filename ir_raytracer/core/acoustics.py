@@ -119,25 +119,60 @@ def iso9613_alpha_dbpm(f_hz: float, T_c: float, rh_pct: float, p_kpa: float) -> 
     Returns:
         Absorption coefficient in dB/m
     """
-    T = 273.15 + float(T_c)
-    T0 = 293.15
-    fr_h = max(0.0, min(100.0, float(rh_pct))) / 100.0
-    P = max(1e-3, float(p_kpa))
-    P0 = 101.325
-    
-    # Relaxation frequencies (approximate forms used in practice)
-    frO = 24.0 + 4.04e4 * fr_h * (0.02 + fr_h) / (0.391 + fr_h)
-    frN = (T / T0)**(-0.5) * (9.0 + 280.0 * fr_h * exp(-4.17 * ((T / T0)**(-1.0/3.0) - 1.0)))
-    
-    fk = (float(f_hz) / 1000.0)
-    fk2 = fk * fk
-    
-    # Classical + rotational/translational + vibrational contributions
-    term_class = 1.84e-11 * (P0 / P) * sqrt(T / T0)
-    term_O = (T / T0)**(-2.5) * (0.01275 * exp(-2239.1 / T)) * (frO / (frO*frO + fk2))
-    term_N = (T / T0)**(-2.5) * (0.1068  * exp(-3352.0 / T)) * (frN / (frN*frN + fk2))
-    
-    alpha = 8.686 * fk2 * (term_class + term_O + term_N)  # dB/m
+    temperature_k = max(1.0, 273.15 + float(T_c))
+    reference_temperature_k = 293.15
+    triple_point_temperature_k = 273.16
+    pressure_kpa = max(1e-3, float(p_kpa))
+    reference_pressure_kpa = 101.325
+    pressure_ratio = pressure_kpa / reference_pressure_kpa
+    temperature_ratio = temperature_k / reference_temperature_k
+    relative_humidity_pct = np.clip(float(rh_pct), 0.0, 100.0)
+
+    # ISO 9613-1 Annex B converts relative humidity to the molar
+    # concentration of water vapour. saturation_pressure_ratio is p_sat/p_ref.
+    saturation_pressure_ratio = 10.0 ** (
+        -6.8346 * (triple_point_temperature_k / temperature_k) ** 1.261
+        + 4.6151
+    )
+    water_vapour_concentration = (
+        relative_humidity_pct * saturation_pressure_ratio / pressure_ratio
+    )
+
+    oxygen_relaxation_hz = pressure_ratio * (
+        24.0
+        + 4.04e4
+        * water_vapour_concentration
+        * (0.02 + water_vapour_concentration)
+        / (0.391 + water_vapour_concentration)
+    )
+    nitrogen_relaxation_hz = (
+        pressure_ratio
+        * temperature_ratio ** -0.5
+        * (
+            9.0
+            + 280.0
+            * water_vapour_concentration
+            * exp(-4.17 * (temperature_ratio ** (-1.0 / 3.0) - 1.0))
+        )
+    )
+
+    frequency_hz = max(0.0, float(f_hz))
+    frequency_squared = frequency_hz * frequency_hz
+    classical_term = (
+        1.84e-11 * pressure_ratio ** -1.0 * sqrt(temperature_ratio)
+    )
+    vibrational_term = temperature_ratio ** -2.5 * (
+        0.01275
+        * exp(-2239.1 / temperature_k)
+        * oxygen_relaxation_hz
+        / (frequency_squared + oxygen_relaxation_hz ** 2)
+        + 0.1068
+        * exp(-3352.0 / temperature_k)
+        * nitrogen_relaxation_hz
+        / (frequency_squared + nitrogen_relaxation_hz ** 2)
+    )
+
+    alpha = 8.686 * frequency_squared * (classical_term + vibrational_term)
     return float(max(0.0, alpha))
 
 
