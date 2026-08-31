@@ -356,20 +356,8 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
             self.report({'ERROR'}, "Reverse tracer failed")
             return None
             
-        # Balance both components before applying the artistic hybrid controls.
-        self.report({'INFO'}, "Balancing forward and reverse IR components...")
-
-        forward_peak = np.max(np.abs(forward_ir))
-        if forward_peak > 1e-9:
-            forward_ir = forward_ir / forward_peak
-            self.report({'INFO'}, f"Normalized forward IR to 0 dBFS (peak was {forward_peak:.6f})")
-        
-        reverse_peak = np.max(np.abs(reverse_ir))
-        if reverse_peak > 1e-9:
-            reverse_ir = reverse_ir / reverse_peak
-            self.report({'INFO'}, f"Normalized reverse IR to 0 dBFS (peak was {reverse_peak:.6f})")
-        
-        # Step 3: Apply user gain adjustments to normalized IRs
+        # Apply artistic gain adjustments without destroying the physically
+        # estimated balance between the two components.
         scene = context.scene
         forward_gain_db = float(scene.airt_hybrid_forward_gain_db)
         reverse_gain_db = float(scene.airt_hybrid_reverse_gain_db)
