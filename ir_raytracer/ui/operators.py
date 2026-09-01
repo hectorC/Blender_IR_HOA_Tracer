@@ -1,9 +1,13 @@
 """Blender operators for rendering and configuring ambisonic IRs."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import os
 import sys
+import threading
+import traceback
+from typing import Any
 
 import bpy
 import numpy as np
@@ -96,6 +100,23 @@ def _acoustic_assignment_metadata(acoustic_scene):
     )
 
 
+@dataclass
+class _RenderRequest:
+    """Blender-data snapshot and export settings for one render."""
+
+    scene: Any
+    soundfile: Any
+    engine: AmbisonicIREngine
+    source: Any
+    receiver: Any
+    output_path: str
+    sample_rate: int
+    wav_subtype: str
+    normalization: str
+    peak_db: float
+    metadata: dict
+
+
 class AIRT_OT_RenderIR(bpy.types.Operator):
     """Render a third-order ACN/SN3D impulse response."""
 
@@ -104,113 +125,137 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
     bl_description = "Render direct, early, and diffuse acoustic energy into a 16-channel HOA WAV"
     bl_options = {'REGISTER'}
 
-    def execute(self, context):
+    _is_running = False
+
+    @classmethod
+    def poll(cls, _context):
+        return not cls._is_running
+
+    def _prepare_request(self, context, for_background=False):
+        """Read all Blender-owned data before acoustic processing begins."""
         available, soundfile_or_error = check_soundfile_availability()
         if not available:
             command = f"{sys.executable} -m pip install soundfile"
-            self.report({'ERROR'}, f"python-soundfile is required: {soundfile_or_error}. Install with {command}")
-            return {'CANCELLED'}
-        soundfile = soundfile_or_error
+            self.report(
+                {'ERROR'},
+                "python-soundfile is required: "
+                f"{soundfile_or_error}. Install with {command}",
+            )
+            return None
 
         source_object = _selected_source(context)
         receiver_object = _selected_receiver(context)
         if source_object is None or receiver_object is None:
             self.report({'ERROR'}, "Choose one Source and one Receiver")
-            return {'CANCELLED'}
+            return None
         if source_object == receiver_object:
-            self.report({'ERROR'}, "Source and Receiver must be different objects")
-            return {'CANCELLED'}
-
-        source = object_world_position(context, source_object)
-        receiver = object_world_position(context, receiver_object)
-        acoustic_scene = build_acoustic_scene(context)
-        if acoustic_scene.bvh is None:
-            self.report({'WARNING'}, "No acoustic geometry found; rendering direct sound only")
-
-        config = AcousticRenderConfig.from_context(context)
-        window_manager = context.window_manager
-        window_manager.progress_begin(0, config.ray_count)
-
-        def update_progress(done, total):
-            window_manager.progress_update(min(done, total))
+            self.report(
+                {'ERROR'}, "Source and Receiver must be different objects"
+            )
+            return None
 
         try:
+            source = object_world_position(context, source_object)
+            receiver = object_world_position(context, receiver_object)
+            acoustic_scene = build_acoustic_scene(context)
+            config = AcousticRenderConfig.from_context(context)
             engine = AmbisonicIREngine(context, config, acoustic_scene)
-            result = engine.render(source, receiver, update_progress)
+            if for_background:
+                engine.prepare_for_background()
+            assignments = _acoustic_assignment_metadata(acoustic_scene)
         except Exception as error:
-            self.report({'ERROR'}, f"Acoustic render failed: {error}")
-            return {'CANCELLED'}
-        finally:
-            window_manager.progress_end()
+            self.report({'ERROR'}, f"Could not prepare acoustic scene: {error}")
+            return None
+
+        if acoustic_scene.bvh is None:
+            self.report(
+                {'WARNING'},
+                "No acoustic geometry found; rendering direct sound only",
+            )
 
         scene = context.scene
+        metadata = {
+            "format": "third-order ambisonic impulse response",
+            "channel_convention": "ACN/SN3D (AmbiX)",
+            "channels": get_ambi_channel_names(),
+            "sample_rate": int(scene.airt_sr),
+            "duration_seconds": float(scene.airt_ir_seconds),
+            "source": source_object.name,
+            "receiver": receiver_object.name,
+            "source_position_bu": list(source),
+            "receiver_position_bu": list(receiver),
+            "content": scene.airt_output_content,
+            "quality": scene.airt_quality_preset,
+            "listener_rays": config.ray_count,
+            "maximum_bounces": config.max_bounces,
+            "seed": config.seed,
+            "scene_unit_scale_metres": config.unit_scale,
+            "speed_of_sound_bu_per_second": config.speed_of_sound_bu,
+            "deterministic_early_reflections": config.early_reflections,
+            "deterministic_reflection_order": config.early_order,
+            "deterministic_path_budget": config.early_path_budget,
+            "early_gain_db": config.early_gain_db,
+            "diffuse_gain_db": config.diffuse_gain_db,
+            "air": {
+                "enabled": config.air_enabled,
+                "temperature_c": config.air_temperature_c,
+                "relative_humidity_percent": config.air_humidity_pct,
+                "pressure_kpa": config.air_pressure_kpa,
+            },
+            "diffraction": {
+                "enabled": config.diffraction_enabled,
+                "maximum_paths": config.diffraction_paths,
+            },
+            "orientation": {
+                "reference": (
+                    "receiver_local"
+                    if config.encoder.use_receiver_orientation
+                    else "blender_world"
+                ),
+                "use_receiver_orientation": (
+                    config.encoder.use_receiver_orientation
+                ),
+                "receiver_world_quaternion_wxyz": (
+                    list(config.encoder.receiver_rotation)
+                    if config.encoder.use_receiver_orientation
+                    else None
+                ),
+                "yaw_degrees": config.encoder.yaw_offset_deg,
+                "invert_z": config.encoder.invert_z,
+            },
+            "frequency_bands_hz": list(BAND_CENTERS_HZ),
+            "acoustic_assignments": assignments,
+        }
+        return _RenderRequest(
+            scene=scene,
+            soundfile=soundfile_or_error,
+            engine=engine,
+            source=source.copy(),
+            receiver=receiver.copy(),
+            output_path=get_writable_path(scene.airt_output_path),
+            sample_rate=int(scene.airt_sr),
+            wav_subtype=scene.airt_wav_subtype,
+            normalization=scene.airt_normalization,
+            peak_db=float(scene.airt_peak_db),
+            metadata=metadata,
+        )
+
+    def _export_result(self, request, result):
         export_ir, applied_gain = prepare_ir_for_export(
             result.ir,
-            scene.airt_normalization,
-            scene.airt_peak_db,
+            request.normalization,
+            request.peak_db,
         )
-        output_path = get_writable_path(scene.airt_output_path)
         try:
-            soundfile.write(
-                output_path,
+            request.soundfile.write(
+                request.output_path,
                 export_ir.T,
-                int(scene.airt_sr),
-                subtype=scene.airt_wav_subtype,
+                request.sample_rate,
+                subtype=request.wav_subtype,
             )
-            metadata = {
-                "format": "third-order ambisonic impulse response",
-                "channel_convention": "ACN/SN3D (AmbiX)",
-                "channels": get_ambi_channel_names(),
-                "sample_rate": int(scene.airt_sr),
-                "duration_seconds": float(scene.airt_ir_seconds),
-                "source": source_object.name,
-                "receiver": receiver_object.name,
-                "source_position_bu": list(source),
-                "receiver_position_bu": list(receiver),
-                "content": scene.airt_output_content,
-                "quality": scene.airt_quality_preset,
-                "listener_rays": config.ray_count,
-                "maximum_bounces": config.max_bounces,
-                "seed": config.seed,
-                "scene_unit_scale_metres": config.unit_scale,
-                "speed_of_sound_bu_per_second": config.speed_of_sound_bu,
-                "deterministic_early_reflections": config.early_reflections,
-                "deterministic_reflection_order": config.early_order,
-                "deterministic_path_budget": config.early_path_budget,
-                "early_gain_db": config.early_gain_db,
-                "diffuse_gain_db": config.diffuse_gain_db,
-                "air": {
-                    "enabled": config.air_enabled,
-                    "temperature_c": config.air_temperature_c,
-                    "relative_humidity_percent": config.air_humidity_pct,
-                    "pressure_kpa": config.air_pressure_kpa,
-                },
-                "diffraction": {
-                    "enabled": config.diffraction_enabled,
-                    "maximum_paths": config.diffraction_paths,
-                },
-                "orientation": {
-                    "reference": (
-                        "receiver_local"
-                        if config.encoder.use_receiver_orientation
-                        else "blender_world"
-                    ),
-                    "use_receiver_orientation": (
-                        config.encoder.use_receiver_orientation
-                    ),
-                    "receiver_world_quaternion_wxyz": (
-                        list(config.encoder.receiver_rotation)
-                        if config.encoder.use_receiver_orientation
-                        else None
-                    ),
-                    "yaw_degrees": config.encoder.yaw_offset_deg,
-                    "invert_z": config.encoder.invert_z,
-                },
-                "frequency_bands_hz": list(BAND_CENTERS_HZ),
-                "acoustic_assignments": _acoustic_assignment_metadata(
-                    acoustic_scene
-                ),
-                "normalization": scene.airt_normalization,
+            metadata = dict(request.metadata)
+            metadata.update({
+                "normalization": request.normalization,
                 "applied_gain": applied_gain,
                 "events": {
                     "direct": result.synthesis.direct_events,
@@ -218,19 +263,29 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
                     "diffuse": result.synthesis.diffuse_events,
                 },
                 "deterministic_path_stats": {
-                    "surface_sequences_tested": result.transport.early_sequences_tested,
-                    "highest_order_evaluated": result.transport.early_highest_order,
-                    "orders_skipped_by_budget": result.transport.early_orders_skipped,
+                    "surface_sequences_tested": (
+                        result.transport.early_sequences_tested
+                    ),
+                    "highest_order_evaluated": (
+                        result.transport.early_highest_order
+                    ),
+                    "orders_skipped_by_budget": (
+                        result.transport.early_orders_skipped
+                    ),
                     "events_by_order": {
                         str(order): sum(
                             event.kind == 'EARLY' and event.order == order
                             for event in result.events
                         )
-                        for order in range(1, config.early_order + 1)
+                        for order in range(
+                            1, request.engine.config.early_order + 1
+                        )
                     },
                 },
-            }
-            with open(output_path + ".json", "w", encoding="utf-8") as metadata_file:
+            })
+            with open(
+                request.output_path + ".json", "w", encoding="utf-8"
+            ) as metadata_file:
                 json.dump(metadata, metadata_file, indent=2)
         except Exception as error:
             self.report({'ERROR'}, f"Failed to write IR: {error}")
@@ -241,14 +296,122 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
             f"{result.synthesis.early_events} early, "
             f"{result.synthesis.diffuse_events} diffuse events"
         )
-        scene.airt_last_render_summary = summary
+        request.scene.airt_last_render_summary = summary
         if result.transport.early_orders_skipped:
             self.report({'WARNING'}, (
                 "Deterministic early reflections reached the path budget; "
-                f"highest completed order was {result.transport.early_highest_order}"
+                "highest completed order was "
+                f"{result.transport.early_highest_order}"
             ))
-        self.report({'INFO'}, f"Saved {os.path.basename(output_path)} — {summary}")
+        self.report(
+            {'INFO'},
+            f"Saved {os.path.basename(request.output_path)} — {summary}",
+        )
         return {'FINISHED'}
+
+    def execute(self, context):
+        request = self._prepare_request(context)
+        if request is None:
+            return {'CANCELLED'}
+        window_manager = context.window_manager
+        window_manager.progress_begin(0, request.engine.config.ray_count)
+
+        def update_progress(done, total):
+            window_manager.progress_update(min(done, total))
+
+        try:
+            result = request.engine.render(
+                request.source, request.receiver, update_progress
+            )
+        except Exception as error:
+            self.report({'ERROR'}, f"Acoustic render failed: {error}")
+            return {'CANCELLED'}
+        finally:
+            window_manager.progress_end()
+        return self._export_result(request, result)
+
+    def invoke(self, context, _event):
+        """Keep interactive Blender responsive while the renderer works."""
+        if bpy.app.background or context.window is None:
+            return self.execute(context)
+
+        request = self._prepare_request(context, for_background=True)
+        if request is None:
+            return {'CANCELLED'}
+
+        self._request = request
+        self._background_result = None
+        self._background_error = None
+        self._background_traceback = None
+        self._progress = (0, request.engine.config.ray_count)
+        self._timer = context.window_manager.event_timer_add(
+            0.1, window=context.window
+        )
+        context.window_manager.progress_begin(
+            0, request.engine.config.ray_count
+        )
+        type(self)._is_running = True
+
+        self._thread = threading.Thread(
+            target=self._run_background,
+            name="AmbisonicIRRender",
+        )
+        try:
+            self._thread.start()
+            context.window_manager.modal_handler_add(self)
+        except Exception as error:
+            self._cleanup_modal(context)
+            self.report({'ERROR'}, f"Could not start acoustic render: {error}")
+            return {'CANCELLED'}
+        return {'RUNNING_MODAL'}
+
+    def _run_background(self):
+        def record_progress(done, total):
+            self._progress = (int(done), int(total))
+
+        try:
+            self._background_result = self._request.engine.render(
+                self._request.source,
+                self._request.receiver,
+                record_progress,
+            )
+        except BaseException as error:
+            self._background_error = error
+            self._background_traceback = traceback.format_exc()
+
+    def modal(self, context, event):
+        if event.type != 'TIMER':
+            return {'PASS_THROUGH'}
+
+        done, total = self._progress
+        if total > 0:
+            request_total = self._request.engine.config.ray_count
+            scaled = int(
+                request_total * min(max(done / total, 0.0), 1.0)
+            )
+            context.window_manager.progress_update(scaled)
+        if self._thread.is_alive():
+            return {'RUNNING_MODAL'}
+
+        self._thread.join()
+        self._cleanup_modal(context)
+        if self._background_error is not None:
+            if self._background_traceback:
+                print(self._background_traceback)
+            self.report(
+                {'ERROR'},
+                f"Acoustic render failed: {self._background_error}",
+            )
+            return {'CANCELLED'}
+        return self._export_result(self._request, self._background_result)
+
+    def _cleanup_modal(self, context):
+        timer = getattr(self, '_timer', None)
+        if timer is not None:
+            context.window_manager.event_timer_remove(timer)
+            self._timer = None
+        context.window_manager.progress_end()
+        type(self)._is_running = False
 
 
 class AIRT_OT_AssignSource(bpy.types.Operator):

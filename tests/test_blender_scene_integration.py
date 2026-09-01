@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from collections import Counter
 from math import pi, sqrt
@@ -615,6 +616,38 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
             self.assertEqual(assignment["type"], "OBJECT_FALLBACK")
             self.assertEqual(assignment["name"], "Test Room")
             self.assertGreater(assignment["evaluated_face_count"], 0)
+
+    def test_acoustic_snapshot_renders_safely_in_worker_thread(self):
+        self._room()
+        source_object = self._endpoint(
+            "Source", (-1.0, 0.0, 0.0), source=True
+        )
+        receiver_object = self._endpoint("Receiver", (1.0, 0.5, 0.0))
+        acoustic_scene = build_acoustic_scene(bpy.context)
+        self.assertTrue(acoustic_scene.faces)
+        self.assertTrue(all(
+            face.material_snapshot is not None
+            for face in acoustic_scene.faces
+        ))
+
+        engine = AmbisonicIREngine(bpy.context, acoustic_scene=acoustic_scene)
+        engine.prepare_for_background()
+        source = object_world_position(bpy.context, source_object)
+        receiver = object_world_position(bpy.context, receiver_object)
+        outcome = {}
+
+        def render():
+            try:
+                outcome["result"] = engine.render(source, receiver)
+            except BaseException as error:
+                outcome["error"] = error
+
+        worker = threading.Thread(target=render)
+        worker.start()
+        worker.join(timeout=5.0)
+        self.assertFalse(worker.is_alive())
+        self.assertNotIn("error", outcome)
+        self.assertEqual(outcome["result"].ir.shape[0], 16)
 
 
 if __name__ == "__main__":

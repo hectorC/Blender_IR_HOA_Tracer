@@ -21,6 +21,7 @@ class AcousticFace:
     normal: mathutils.Vector
     object_ref: Any
     material_ref: Any = None
+    material_snapshot: Any = None
 
     @property
     def acoustic_ref(self) -> Any:
@@ -58,6 +59,8 @@ def _face_normal(vertices: Sequence[mathutils.Vector]) -> mathutils.Vector:
 
 def build_acoustic_scene(context) -> AcousticScene:
     """Build a BVH from visible evaluated meshes using evaluated transforms."""
+    from ..core.acoustics import MaterialProperties
+
     scene = getattr(context, "scene", None) or bpy.context.scene
     view_layer = getattr(context, "view_layer", None)
     depsgraph_get = getattr(context, "evaluated_depsgraph_get", None)
@@ -70,6 +73,7 @@ def build_acoustic_scene(context) -> AcousticScene:
     vertices: List[mathutils.Vector] = []
     polygons: List[Tuple[int, ...]] = []
     faces: List[AcousticFace] = []
+    material_snapshots = {}
 
     for obj in scene.objects:
         visible = obj.visible_get(view_layer=view_layer) if view_layer else obj.visible_get()
@@ -110,12 +114,28 @@ def build_acoustic_scene(context) -> AcousticScene:
                     material_ref = getattr(
                         material_ref, "original", material_ref
                     )
+                acoustic_owner = (
+                    material_ref
+                    if (
+                        material_ref is not None
+                        and bool(getattr(
+                            material_ref, 'airt_acoustic_enabled', False
+                        ))
+                    )
+                    else obj
+                )
+                owner_key = id(acoustic_owner)
+                material_snapshot = material_snapshots.get(owner_key)
+                if material_snapshot is None:
+                    material_snapshot = MaterialProperties(acoustic_owner)
+                    material_snapshots[owner_key] = material_snapshot
                 polygons.append(tuple(base_index + index for index in local_indices))
                 faces.append(AcousticFace(
                     vertices=face_vertices,
                     normal=_face_normal(face_vertices),
                     object_ref=obj,
                     material_ref=material_ref,
+                    material_snapshot=material_snapshot,
                 ))
         finally:
             obj_eval.to_mesh_clear()
@@ -243,7 +263,10 @@ def spectral_visibility(
         if not (0 <= face_index < len(acoustic_scene.faces)):
             return np.zeros(NUM_BANDS, dtype=np.float32)
 
-        material = MaterialProperties(acoustic_scene.faces[face_index].acoustic_ref)
+        face = acoustic_scene.faces[face_index]
+        material = face.material_snapshot
+        if material is None:
+            material = MaterialProperties(face.acoustic_ref)
         gain *= material.transmission_spectrum
         if float(np.max(gain)) <= 1e-10:
             return np.zeros(NUM_BANDS, dtype=np.float32)

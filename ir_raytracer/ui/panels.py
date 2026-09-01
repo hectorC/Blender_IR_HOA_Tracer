@@ -54,7 +54,9 @@ class AIRT_PT_Panel(_AIRTPanel, bpy.types.Panel):
         row = render.row(align=True)
         row.prop(scene, "airt_output_content", text="Content")
         render.operator("airt.render_ir", icon='SOUND')
-        if scene.airt_last_render_summary:
+        if not bpy.ops.airt.render_ir.poll():
+            render.label(text="Rendering acoustic IR…", icon='TIME')
+        elif scene.airt_last_render_summary:
             render.label(text=scene.airt_last_render_summary, icon='CHECKMARK')
 
 

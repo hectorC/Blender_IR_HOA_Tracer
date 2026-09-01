@@ -342,7 +342,10 @@ class ReceiverPathTracer:
 
     def material_for_face(self, face_index: int) -> MaterialProperties:
         """Return one immutable coefficient snapshot per assignment owner."""
-        owner = self.scene.faces[face_index].acoustic_ref
+        face = self.scene.faces[face_index]
+        if face.material_snapshot is not None:
+            return face.material_snapshot
+        owner = face.acoustic_ref
         key = id(owner)
         material = self._material_cache.get(key)
         if material is None:
@@ -677,6 +680,20 @@ class AmbisonicIREngine:
         self.config = config or AcousticRenderConfig.from_context(context)
         self.scene = acoustic_scene or build_acoustic_scene(context)
         self.tracer = ReceiverPathTracer(self.config, self.scene)
+        self._diffraction_prepared = False
+        self._diffraction_edge_index = None
+
+    def prepare_for_background(self) -> None:
+        """Snapshot the remaining Blender-dependent data before threading."""
+        self._diffraction_prepared = True
+        if not self.config.diffraction_enabled:
+            return
+        try:
+            self._diffraction_edge_index = build_diffraction_edge_index(
+                self.context
+            )
+        except Exception as error:
+            print(f"Diffraction disabled for this render: {error}")
 
     def _air_energy(self, distance_bu: float) -> np.ndarray:
         return self.tracer._air_energy(distance_bu)
@@ -716,7 +733,13 @@ class AmbisonicIREngine:
         ):
             return events
         try:
-            edge_index = build_diffraction_edge_index(self.context)
+            edge_index = (
+                self._diffraction_edge_index
+                if self._diffraction_prepared
+                else build_diffraction_edge_index(self.context)
+            )
+            if edge_index is None:
+                return events
             paths = find_diffraction_paths(
                 source,
                 receiver,
