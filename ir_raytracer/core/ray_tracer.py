@@ -121,6 +121,92 @@ class AcousticRenderResult:
     synthesis: SynthesisStats
 
 
+@dataclass
+class _EarlyPathCandidate:
+    """Internal deterministic path plus the surface object that produced it."""
+
+    event: AcousticEvent
+    surface_id: int
+
+
+def _cluster_unresolved_early_paths(
+    candidates: List[_EarlyPathCandidate],
+    time_tolerance_seconds: float = 0.00025,
+    angle_tolerance_rad: float = 12.0 * pi / 180.0,
+) -> List[AcousticEvent]:
+    """Consolidate paths that the third-order output cannot resolve.
+
+    A faceted concave surface can produce dozens of almost identical image
+    paths, each carrying the infinite-plane amplitude. Summing those pressures
+    makes the result depend on mesh subdivision and creates unbounded caustics.
+    Candidates from the same object that arrive within a quarter millisecond
+    and a twelve-degree cone are therefore represented by one conservative
+    path. Per-band maxima retain the strongest material response without
+    multiplying it by the number of modeling facets.
+    """
+    if not candidates:
+        return []
+
+    cosine_threshold = cos(float(angle_tolerance_rad))
+    clusters = []
+    for candidate in sorted(candidates, key=lambda item: item.event.delay_seconds):
+        matching_cluster = None
+        for cluster in reversed(clusters):
+            reference = cluster[0]
+            if (
+                candidate.event.delay_seconds
+                - reference.event.delay_seconds
+                > time_tolerance_seconds
+            ):
+                break
+            if candidate.surface_id != reference.surface_id:
+                continue
+            if (
+                candidate.event.arrival_direction.dot(
+                    reference.event.arrival_direction
+                )
+                < cosine_threshold
+            ):
+                continue
+            matching_cluster = cluster
+            break
+        if matching_cluster is None:
+            clusters.append([candidate])
+        else:
+            matching_cluster.append(candidate)
+
+    events: List[AcousticEvent] = []
+    for cluster in clusters:
+        if len(cluster) == 1:
+            events.append(cluster[0].event)
+            continue
+
+        energies = np.stack([
+            np.maximum(candidate.event.energy_bands, 0.0)
+            for candidate in cluster
+        ]).astype(np.float64)
+        weights = np.maximum(np.mean(energies, axis=1), 1e-20)
+        delay = float(np.average(
+            [candidate.event.delay_seconds for candidate in cluster],
+            weights=weights,
+        ))
+        direction = mathutils.Vector((0.0, 0.0, 0.0))
+        for candidate, weight in zip(cluster, weights):
+            direction += candidate.event.arrival_direction * float(weight)
+        if direction.length_squared <= 1e-20:
+            direction = cluster[0].event.arrival_direction.copy()
+        else:
+            direction.normalize()
+        events.append(AcousticEvent(
+            delay_seconds=delay,
+            arrival_direction=direction,
+            energy_bands=np.max(energies, axis=0).astype(np.float32),
+            kind='EARLY',
+            order=cluster[0].event.order,
+        ))
+    return events
+
+
 class ReceiverPathTracer:
     """Trace time-resolved acoustic energy from the listener toward the source."""
 
@@ -538,7 +624,7 @@ class AmbisonicIREngine:
         ):
             return []
 
-        events: List[AcousticEvent] = []
+        candidates: List[_EarlyPathCandidate] = []
         seen = set()
         for face_index, face in enumerate(self.scene.faces):
             if not face.vertices:
@@ -605,14 +691,18 @@ class AmbisonicIREngine:
                 * self._air_energy(total_distance_bu)
                 / max(distance_m * distance_m, 1e-12)
             )
-            events.append(AcousticEvent(
-                delay_seconds=total_distance_bu / self.config.speed_of_sound_bu,
-                arrival_direction=(reflection_point - receiver).normalized(),
-                energy_bands=energy.astype(np.float32),
-                kind='EARLY',
-                order=1,
+            candidates.append(_EarlyPathCandidate(
+                event=AcousticEvent(
+                    delay_seconds=total_distance_bu / self.config.speed_of_sound_bu,
+                    arrival_direction=(reflection_point - receiver).normalized(),
+                    energy_bands=energy.astype(np.float32),
+                    kind='EARLY',
+                    order=1,
+                ),
+                surface_id=id(face.object_ref),
             ))
-            self.tracer.stats.early_events += 1
+        events = _cluster_unresolved_early_paths(candidates)
+        self.tracer.stats.early_events += len(events)
         return events
 
     def render(

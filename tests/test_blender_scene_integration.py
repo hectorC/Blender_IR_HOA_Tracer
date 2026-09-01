@@ -172,7 +172,7 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
             self.assertFalse(scene.airt_enable_diffraction)
             self.assertEqual(scene.airt_seed, 1)
             self.assertEqual(scene.airt_wav_subtype, 'FLOAT')
-            self.assertEqual(scene.airt_normalization, 'PEAK')
+            self.assertEqual(scene.airt_normalization, 'PRESERVE')
             self.assertAlmostEqual(scene.airt_peak_db, -1.0)
         finally:
             bpy.data.scenes.remove(scene)
@@ -198,6 +198,38 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
             self.assertEqual(scene.airt_quality_preset, 'CUSTOM')
         finally:
             bpy.data.scenes.remove(scene)
+
+    def test_faceted_cylinder_does_not_multiply_axial_early_reflection(self):
+        scene = bpy.context.scene
+        scene.airt_ir_seconds = 1.0
+        scene.airt_output_content = 'FULL'
+        scene.airt_early_reflections = True
+        self._endpoint("Source", (0.0, 0.0, 0.0), source=True)
+        self._endpoint("Receiver", (0.0, 0.0, 151.528))
+        bpy.ops.mesh.primitive_cylinder_add(
+            vertices=94,
+            radius=6.0,
+            depth=179.0,
+            end_fill_type='NGON',
+            location=(0.0, 0.0, 87.48),
+        )
+        cylinder = bpy.context.object
+        cylinder.airt_material_preset = 'BRICK'
+
+        engine = AmbisonicIREngine(bpy.context)
+        source = object_world_position(bpy.context, scene.airt_source_object)
+        receiver = object_world_position(bpy.context, scene.airt_receiver_object)
+        events = engine._first_order_specular_events(source, receiver)
+
+        # Ninety-four side polygons describe one temporally and spatially
+        # unresolved cylindrical reflection. The two end caps remain separate.
+        self.assertEqual(len(events), 3)
+        side_events = [
+            event for event in events
+            if 0.441 < event.delay_seconds < 0.443
+        ]
+        self.assertEqual(len(side_events), 1)
+        self.assertLess(side_events[0].arrival_direction.z, -0.99)
 
     def test_render_operator_writes_16_channel_wav_and_metadata(self):
         import soundfile

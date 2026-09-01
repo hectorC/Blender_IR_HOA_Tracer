@@ -85,7 +85,7 @@ The defaults are intended as a useful first listening render:
 | Air absorption | On | 20 C, 50% RH, 101.325 kPa |
 | Random seed | 1 | Repeatable comparison between scene edits |
 | Edge diffraction | Off | Enable only when shadowing needs it |
-| Output | 32-bit float | Peak-normalized to -1 dBFS |
+| Output | 32-bit float | Preserves the renderer's 1/r distance level |
 
 Use **Preview** while moving geometry or auditioning materials. Use **High** for
 a smoother final tail. **Ultra High** uses 16,384 listener rays, 128 bounces,
@@ -95,10 +95,12 @@ under explicit user control. If the tail sounds grainy, raise Listener Rays
 before raising Maximum Bounces. If energy stops too soon, increase IR Duration
 and Maximum Bounces together.
 
-Peak normalization is the safest listening default and preserves interchannel
-and time relationships within each rendered IR. **Preserve Relative Level** is
-provided for comparing distance and material levels between renders; float WAV
-is recommended because close sources can exceed 0 dBFS in that mode.
+**Preserve Relative Level** is the default so Full IR exports retain distance
+and material level differences. Float WAV is recommended because close sources
+can exceed 0 dBFS in this mode. **Normalize for Audition** preserves
+interchannel and time relationships within one IR but raises its peak to the
+selected level, thereby removing its absolute distance reference. It is most
+appropriate for quickly auditioning Wet or Diffuse IRs.
 
 ## Acoustic materials
 

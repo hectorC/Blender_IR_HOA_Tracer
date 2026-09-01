@@ -362,10 +362,10 @@ def register_acoustic_props():
     scene.airt_normalization = bpy.props.EnumProperty(
         name="Output Level",
         items=[
-            ('PEAK', 'Normalize Peak', 'Normalize to the selected peak level'),
             ('PRESERVE', 'Preserve Relative Level', 'Keep the renderer\'s 1/r reference level'),
+            ('PEAK', 'Normalize for Audition', 'Normalize the peak and remove absolute distance level'),
         ],
-        default='PEAK',
+        default='PRESERVE',
     )
     scene.airt_peak_db = bpy.props.FloatProperty(
         name="Normalized Peak",

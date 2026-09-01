@@ -97,6 +97,7 @@ class AIRT_PT_AudioPanel(_AIRTPanel, bpy.types.Panel):
         output.prop(scene, "airt_normalization")
         if scene.airt_normalization == 'PEAK':
             output.prop(scene, "airt_peak_db")
+            output.label(text="Removes absolute distance level", icon='ERROR')
         output.label(text="16 channels — ACN/SN3D (AmbiX)", icon='INFO')
 
 
