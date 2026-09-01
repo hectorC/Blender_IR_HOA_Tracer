@@ -88,9 +88,12 @@ The defaults are intended as a useful first listening render:
 | Output | 32-bit float | Peak-normalized to -1 dBFS |
 
 Use **Preview** while moving geometry or auditioning materials. Use **High** for
-a smoother final tail. If the tail sounds grainy, raise Listener Rays before
-raising Maximum Bounces. If energy stops too soon, increase IR Duration and
-Maximum Bounces together.
+a smoother final tail. **Ultra High** uses 16,384 listener rays, 128 bounces,
+later path roulette, and a lower energy cutoff for long or complex spaces. It
+only changes transport quality; sample rate, duration, and IR content remain
+under explicit user control. If the tail sounds grainy, raise Listener Rays
+before raising Maximum Bounces. If energy stops too soon, increase IR Duration
+and Maximum Bounces together.
 
 Peak normalization is the safest listening default and preserves interchannel
 and time relationships within each rendered IR. **Preserve Relative Level** is

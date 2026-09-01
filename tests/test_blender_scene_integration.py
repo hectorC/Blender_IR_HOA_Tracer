@@ -177,6 +177,28 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
         finally:
             bpy.data.scenes.remove(scene)
 
+    def test_ultra_high_profile_increases_transport_quality_only(self):
+        scene = bpy.data.scenes.new("Ultra High Test")
+        try:
+            original_sample_rate = scene.airt_sr
+            original_duration = scene.airt_ir_seconds
+            original_content = scene.airt_output_content
+            scene.airt_quality_preset = 'ULTRA'
+
+            self.assertEqual(scene.airt_num_rays, 16384)
+            self.assertEqual(scene.airt_max_order, 128)
+            self.assertEqual(scene.airt_rr_start, 48)
+            self.assertAlmostEqual(scene.airt_rr_p, 0.99)
+            self.assertAlmostEqual(scene.airt_min_throughput, 1e-8)
+            self.assertEqual(scene.airt_sr, original_sample_rate)
+            self.assertEqual(scene.airt_ir_seconds, original_duration)
+            self.assertEqual(scene.airt_output_content, original_content)
+
+            scene.airt_num_rays = 20000
+            self.assertEqual(scene.airt_quality_preset, 'CUSTOM')
+        finally:
+            bpy.data.scenes.remove(scene)
+
     def test_render_operator_writes_16_channel_wav_and_metadata(self):
         import soundfile
 

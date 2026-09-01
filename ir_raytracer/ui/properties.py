@@ -32,6 +32,13 @@ QUALITY_PROFILES = {
         'airt_rr_p': 0.98,
         'airt_min_throughput': 1e-6,
     },
+    'ULTRA': {
+        'airt_num_rays': 16384,
+        'airt_max_order': 128,
+        'airt_rr_start': 48,
+        'airt_rr_p': 0.99,
+        'airt_min_throughput': 1e-8,
+    },
 }
 
 
@@ -181,6 +188,7 @@ def register_acoustic_props():
             ('PREVIEW', 'Preview', 'Fast spatial and decay preview'),
             ('BALANCED', 'Balanced', 'Recommended starting point'),
             ('HIGH', 'High', 'Smoother final render'),
+            ('ULTRA', 'Ultra High', 'Maximum convergence for long, complex spaces'),
             ('CUSTOM', 'Custom', 'Manually configured ray settings'),
         ],
         default='BALANCED',
