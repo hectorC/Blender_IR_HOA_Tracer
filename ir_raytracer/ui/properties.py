@@ -96,9 +96,19 @@ def _update_material_preset(self, _context):
 @persistent
 def _refresh_named_material_presets(_unused):
     """Refresh named presets after a file load; leave Custom owners intact."""
-    for owner in tuple(bpy.data.objects) + tuple(bpy.data.materials):
+    objects = getattr(bpy.data, 'objects', None)
+    materials = getattr(bpy.data, 'materials', None)
+    if objects is None or materials is None:
+        return False
+    for owner in tuple(objects) + tuple(materials):
         if hasattr(owner, 'airt_material_preset'):
             _apply_material_preset(owner)
+    return True
+
+
+def _deferred_named_material_refresh():
+    """Wait until Blender releases restricted registration data access."""
+    return None if _refresh_named_material_presets(None) else 0.1
 
 
 def _enable_material_acoustics(self):
@@ -512,10 +522,16 @@ def register_acoustic_props():
     )
     if _refresh_named_material_presets not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_refresh_named_material_presets)
-    _refresh_named_material_presets(None)
+    if not bpy.app.timers.is_registered(_deferred_named_material_refresh):
+        bpy.app.timers.register(
+            _deferred_named_material_refresh,
+            first_interval=0.0,
+        )
 
 
 def unregister_acoustic_props():
+    if bpy.app.timers.is_registered(_deferred_named_material_refresh):
+        bpy.app.timers.unregister(_deferred_named_material_refresh)
     if _refresh_named_material_presets in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_refresh_named_material_presets)
     acoustic_owner_names = (
