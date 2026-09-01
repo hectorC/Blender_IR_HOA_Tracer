@@ -61,6 +61,8 @@ def _update_material_preset(self, _context):
     key = id(self)
     _MATERIAL_GUARD.add(key)
     try:
+        if hasattr(self, 'airt_acoustic_enabled'):
+            self.airt_acoustic_enabled = True
         self.absorption = float(preset['absorption'])
         self.scatter = float(preset['scatter'])
         self.transmission = 0.0
@@ -72,8 +74,76 @@ def _update_material_preset(self, _context):
 
 
 def _mark_material_custom(self, _context):
+    if hasattr(self, 'airt_acoustic_enabled'):
+        self.airt_acoustic_enabled = True
     if id(self) not in _MATERIAL_GUARD and self.airt_material_preset != 'CUSTOM':
         self.airt_material_preset = 'CUSTOM'
+
+
+def _register_acoustic_owner_props(owner):
+    """Register the coefficient schema on an Object or Material datablock."""
+    owner.airt_material_preset = bpy.props.EnumProperty(
+        name="Acoustic Material",
+        description="Starting point for frequency-dependent absorption and scattering",
+        items=_material_items(),
+        default='CUSTOM',
+        update=_update_material_preset,
+    )
+    owner.absorption = bpy.props.FloatProperty(
+        name="Absorption",
+        description="Broadband absorbed-energy fraction",
+        default=0.2,
+        min=0.0,
+        max=1.0,
+        update=_mark_material_custom,
+    )
+    owner.absorption_bands = bpy.props.FloatVectorProperty(
+        name="Absorption Bands",
+        description="Energy absorption at 125 Hz through 8 kHz",
+        size=NUM_BANDS,
+        min=0.0,
+        max=1.0,
+        default=tuple(0.2 for _ in range(NUM_BANDS)),
+        update=_mark_material_custom,
+    )
+    owner.scatter = bpy.props.FloatProperty(
+        name="Scattering",
+        description="Fraction of reflected energy distributed diffusely",
+        default=0.35,
+        min=0.0,
+        max=1.0,
+        update=_mark_material_custom,
+    )
+    owner.scatter_bands = bpy.props.FloatVectorProperty(
+        name="Scattering Bands",
+        description="Diffuse-reflection fraction at 125 Hz through 8 kHz",
+        size=NUM_BANDS,
+        min=0.0,
+        max=1.0,
+        default=tuple(0.35 for _ in range(NUM_BANDS)),
+        update=_mark_material_custom,
+    )
+    owner.transmission = bpy.props.FloatProperty(
+        name="Transmission",
+        description="Broadband energy fraction passing through the surface",
+        default=0.0,
+        min=0.0,
+        max=1.0,
+        update=_mark_material_custom,
+    )
+    owner.transmission_bands = bpy.props.FloatVectorProperty(
+        name="Transmission Bands",
+        description="Transmitted-energy fraction at 125 Hz through 8 kHz",
+        size=NUM_BANDS,
+        min=0.0,
+        max=1.0,
+        default=tuple(0.0 for _ in range(NUM_BANDS)),
+        update=_mark_material_custom,
+    )
+    owner.show_frequency_details = bpy.props.BoolProperty(
+        name="Band Details",
+        default=False,
+    )
 
 
 def _update_quality_profile(self, _context):
@@ -96,65 +166,15 @@ def _mark_quality_custom(self, _context):
 
 def register_acoustic_props():
     obj = bpy.types.Object
+    material = bpy.types.Material
     scene = bpy.types.Scene
 
-    obj.airt_material_preset = bpy.props.EnumProperty(
-        name="Acoustic Material",
-        description="Starting point for frequency-dependent absorption and scattering",
-        items=_material_items(),
-        default='CUSTOM',
-        update=_update_material_preset,
-    )
-    obj.absorption = bpy.props.FloatProperty(
-        name="Absorption",
-        description="Broadband absorbed-energy fraction",
-        default=0.2,
-        min=0.0,
-        max=1.0,
-        update=_mark_material_custom,
-    )
-    obj.absorption_bands = bpy.props.FloatVectorProperty(
-        name="Absorption Bands",
-        description="Energy absorption at 125 Hz through 8 kHz",
-        size=NUM_BANDS,
-        min=0.0,
-        max=1.0,
-        default=tuple(0.2 for _ in range(NUM_BANDS)),
-        update=_mark_material_custom,
-    )
-    obj.scatter = bpy.props.FloatProperty(
-        name="Scattering",
-        description="Fraction of reflected energy distributed diffusely",
-        default=0.35,
-        min=0.0,
-        max=1.0,
-        update=_mark_material_custom,
-    )
-    obj.scatter_bands = bpy.props.FloatVectorProperty(
-        name="Scattering Bands",
-        description="Diffuse-reflection fraction at 125 Hz through 8 kHz",
-        size=NUM_BANDS,
-        min=0.0,
-        max=1.0,
-        default=tuple(0.35 for _ in range(NUM_BANDS)),
-        update=_mark_material_custom,
-    )
-    obj.transmission = bpy.props.FloatProperty(
-        name="Transmission",
-        description="Broadband energy fraction passing through the surface",
-        default=0.0,
-        min=0.0,
-        max=1.0,
-        update=_mark_material_custom,
-    )
-    obj.transmission_bands = bpy.props.FloatVectorProperty(
-        name="Transmission Bands",
-        description="Transmitted-energy fraction at 125 Hz through 8 kHz",
-        size=NUM_BANDS,
-        min=0.0,
-        max=1.0,
-        default=tuple(0.0 for _ in range(NUM_BANDS)),
-        update=_mark_material_custom,
+    _register_acoustic_owner_props(obj)
+    _register_acoustic_owner_props(material)
+    material.airt_acoustic_enabled = bpy.props.BoolProperty(
+        name="Use Material Acoustics",
+        description="Use this Blender material's coefficients on assigned faces",
+        default=False,
     )
     obj.is_acoustic_source = bpy.props.BoolProperty(
         name="Acoustic Source",
@@ -166,11 +186,6 @@ def register_acoustic_props():
         description="Use this object's evaluated world position as the HOA receiver",
         default=False,
     )
-    obj.show_frequency_details = bpy.props.BoolProperty(
-        name="Band Details",
-        default=False,
-    )
-
     scene.airt_source_object = bpy.props.PointerProperty(
         name="Source",
         description="Object whose evaluated world position defines the source",
@@ -406,11 +421,15 @@ def register_acoustic_props():
 
 
 def unregister_acoustic_props():
-    object_names = (
+    acoustic_owner_names = (
         'airt_material_preset', 'absorption', 'absorption_bands', 'scatter',
         'scatter_bands', 'transmission', 'transmission_bands',
-        'is_acoustic_source', 'is_acoustic_receiver', 'show_frequency_details',
+        'show_frequency_details',
     )
+    object_names = acoustic_owner_names + (
+        'is_acoustic_source', 'is_acoustic_receiver',
+    )
+    material_names = acoustic_owner_names + ('airt_acoustic_enabled',)
     scene_names = (
         'airt_source_object', 'airt_receiver_object', 'airt_quality_preset',
         'airt_num_rays', 'airt_max_order', 'airt_sr', 'airt_ir_seconds',
@@ -429,6 +448,9 @@ def unregister_acoustic_props():
     for name in object_names:
         if hasattr(bpy.types.Object, name):
             delattr(bpy.types.Object, name)
+    for name in material_names:
+        if hasattr(bpy.types.Material, name):
+            delattr(bpy.types.Material, name)
     for name in scene_names:
         if hasattr(bpy.types.Scene, name):
             delattr(bpy.types.Scene, name)

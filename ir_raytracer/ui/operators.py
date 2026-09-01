@@ -62,6 +62,35 @@ def _selected_receiver(context):
     return tagged[0] if tagged else None
 
 
+def _acoustic_assignment_metadata(acoustic_scene):
+    """Describe the unique coefficient owners used by evaluated faces."""
+    assignments = {}
+    for face in acoustic_scene.faces:
+        owner = face.acoustic_ref
+        key = id(owner)
+        entry = assignments.get(key)
+        if entry is None:
+            entry = {
+                "type": (
+                    "BLENDER_MATERIAL"
+                    if isinstance(owner, bpy.types.Material)
+                    else "OBJECT_FALLBACK"
+                ),
+                "name": owner.name,
+                "preset": owner.airt_material_preset,
+                "absorption_bands": list(owner.absorption_bands),
+                "scattering_bands": list(owner.scatter_bands),
+                "transmission_bands": list(owner.transmission_bands),
+                "evaluated_face_count": 0,
+            }
+            assignments[key] = entry
+        entry["evaluated_face_count"] += 1
+    return sorted(
+        assignments.values(),
+        key=lambda entry: (entry["type"], entry["name"]),
+    )
+
+
 class AIRT_OT_RenderIR(bpy.types.Operator):
     """Render a third-order ACN/SN3D impulse response."""
 
@@ -173,6 +202,9 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
                     "invert_z": config.encoder.invert_z,
                 },
                 "frequency_bands_hz": list(BAND_CENTERS_HZ),
+                "acoustic_assignments": _acoustic_assignment_metadata(
+                    acoustic_scene
+                ),
                 "normalization": scene.airt_normalization,
                 "applied_gain": applied_gain,
                 "events": {
@@ -301,26 +333,58 @@ class AIRT_OT_ResetMaterial(bpy.types.Operator):
         obj = context.active_object
         if obj is None:
             return {'CANCELLED'}
-        obj.airt_material_preset = 'CUSTOM'
-        obj.absorption = 0.2
-        obj.scatter = 0.35
-        obj.transmission = 0.0
-        obj.absorption_bands = tuple(0.2 for _ in range(NUM_BANDS))
-        obj.scatter_bands = tuple(0.35 for _ in range(NUM_BANDS))
-        obj.transmission_bands = tuple(0.0 for _ in range(NUM_BANDS))
+        material = obj.active_material
+        owner = (
+            material
+            if material is not None and material.airt_acoustic_enabled
+            else obj
+        )
+        owner.airt_material_preset = 'CUSTOM'
+        owner.absorption = 0.2
+        owner.scatter = 0.35
+        owner.transmission = 0.0
+        owner.absorption_bands = tuple(0.2 for _ in range(NUM_BANDS))
+        owner.scatter_bands = tuple(0.35 for _ in range(NUM_BANDS))
+        owner.transmission_bands = tuple(0.0 for _ in range(NUM_BANDS))
         return {'FINISHED'}
 
 
 class AIRT_OT_CopyMaterial(bpy.types.Operator):
     bl_idname = "airt.copy_material"
     bl_label = "Copy Acoustic Material to Selected"
-    bl_description = "Copy active-object acoustic coefficients to the other selected objects"
+    bl_description = "Copy active acoustic coefficients to matching selected assignments"
 
     def execute(self, context):
-        source = context.active_object
-        targets = [obj for obj in context.selected_objects if obj != source]
-        if source is None or not targets:
+        source_object = context.active_object
+        target_objects = [
+            obj for obj in context.selected_objects
+            if obj != source_object and obj.type == 'MESH'
+        ]
+        if source_object is None or not target_objects:
             self.report({'ERROR'}, "Select a source object and at least one target")
+            return {'CANCELLED'}
+
+        source_material = source_object.active_material
+        using_material = (
+            source_material is not None
+            and source_material.airt_acoustic_enabled
+        )
+        source = source_material if using_material else source_object
+        targets = []
+        if using_material:
+            seen = {id(source_material)}
+            for obj in target_objects:
+                material = obj.active_material
+                if material is None or id(material) in seen:
+                    continue
+                material.airt_acoustic_enabled = True
+                targets.append(material)
+                seen.add(id(material))
+        else:
+            targets = target_objects
+
+        if not targets:
+            self.report({'ERROR'}, "Selected targets have no distinct active assignment")
             return {'CANCELLED'}
         for target in targets:
             target.airt_material_preset = source.airt_material_preset
@@ -330,7 +394,8 @@ class AIRT_OT_CopyMaterial(bpy.types.Operator):
             target.absorption_bands = tuple(source.absorption_bands)
             target.scatter_bands = tuple(source.scatter_bands)
             target.transmission_bands = tuple(source.transmission_bands)
-        self.report({'INFO'}, f"Copied acoustic material to {len(targets)} object(s)")
+        assignment = "material(s)" if using_material else "object fallback(s)"
+        self.report({'INFO'}, f"Copied acoustic settings to {len(targets)} {assignment}")
         return {'FINISHED'}
 
 

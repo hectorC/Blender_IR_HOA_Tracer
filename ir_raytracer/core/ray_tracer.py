@@ -165,11 +165,14 @@ class _SpecularSurface:
     normal: mathutils.Vector
     object_ref: object
 
-    def contains(self, point: mathutils.Vector, scene: AcousticScene) -> bool:
-        return any(
-            point_in_face(point, scene.faces[index])
-            for index in self.face_indices
-        )
+    def face_at(
+        self, point: mathutils.Vector, scene: AcousticScene
+    ) -> Optional[int]:
+        """Return the finite polygon hit at this point, including its material."""
+        return next((
+            index for index in self.face_indices
+            if point_in_face(point, scene.faces[index])
+        ), None)
 
 
 def _canonical_plane(face) -> Tuple[mathutils.Vector, float]:
@@ -338,12 +341,12 @@ class ReceiverPathTracer:
         self.deterministic_specular_order = 0
 
     def material_for_face(self, face_index: int) -> MaterialProperties:
-        """Return one immutable coefficient snapshot per acoustic object."""
-        obj = self.scene.faces[face_index].object_ref
-        key = id(obj)
+        """Return one immutable coefficient snapshot per assignment owner."""
+        owner = self.scene.faces[face_index].acoustic_ref
+        key = id(owner)
         material = self._material_cache.get(key)
         if material is None:
-            material = MaterialProperties(obj)
+            material = MaterialProperties(owner)
             self._material_cache[key] = material
         return material
 
@@ -757,7 +760,9 @@ class AmbisonicIREngine:
         receiver: mathutils.Vector,
         surfaces: Sequence[_SpecularSurface],
         sequence: Sequence[int],
-    ) -> Optional[Tuple[List[mathutils.Vector], float, np.ndarray]]:
+    ) -> Optional[
+        Tuple[List[mathutils.Vector], List[int], float, np.ndarray]
+    ]:
         """Reconstruct and validate one finite image-source path."""
         images = [source.copy()]
         for surface_index in sequence:
@@ -777,6 +782,7 @@ class AmbisonicIREngine:
             return None
 
         reflection_points = [None] * len(sequence)
+        reflection_faces = [None] * len(sequence)
         endpoint = receiver.copy()
         for path_index in range(len(sequence) - 1, -1, -1):
             surface = surfaces[sequence[path_index]]
@@ -790,9 +796,11 @@ class AmbisonicIREngine:
             if fraction <= 1e-7 or fraction >= 1.0 - 1e-7:
                 return None
             reflection_point = endpoint + image_ray * fraction
-            if not surface.contains(reflection_point, self.scene):
+            face_index = surface.face_at(reflection_point, self.scene)
+            if face_index is None:
                 return None
             reflection_points[path_index] = reflection_point
+            reflection_faces[path_index] = face_index
             endpoint = reflection_point
 
         path_points = [source] + reflection_points + [receiver]
@@ -833,7 +841,7 @@ class AmbisonicIREngine:
             >= self.config.duration_seconds
         ):
             return None
-        return reflection_points, total_distance_bu, visibility
+        return reflection_points, reflection_faces, total_distance_bu, visibility
 
     def _deterministic_specular_events(
         self,
@@ -854,16 +862,20 @@ class AmbisonicIREngine:
             3,
         ))
         surfaces = []
-        surface_specular_energy = []
         for surface in _build_specular_surfaces(self.scene):
-            material = self.tracer.material_for_face(surface.face_indices[0])
-            specular_energy = (
-                material.reflection_spectrum * material.specular_fraction
-            ).astype(np.float64)
-            if not np.any(specular_energy > 1e-10):
+            has_specular_face = False
+            for face_index in surface.face_indices:
+                material = self.tracer.material_for_face(face_index)
+                if np.any(
+                    material.reflection_spectrum
+                    * material.specular_fraction
+                    > 1e-10
+                ):
+                    has_specular_face = True
+                    break
+            if not has_specular_face:
                 continue
             surfaces.append(surface)
-            surface_specular_energy.append(specular_energy)
 
         candidates: List[_EarlyPathCandidate] = []
         seen = set()
@@ -889,7 +901,12 @@ class AmbisonicIREngine:
                 )
                 if path is None:
                     continue
-                reflection_points, total_distance_bu, visibility = path
+                (
+                    reflection_points,
+                    reflection_faces,
+                    total_distance_bu,
+                    visibility,
+                ) = path
 
                 key = tuple(
                     component
@@ -905,8 +922,11 @@ class AmbisonicIREngine:
                 seen.add(key)
 
                 specular_energy = np.ones(NUM_BANDS, dtype=np.float64)
-                for surface_index in sequence:
-                    specular_energy *= surface_specular_energy[surface_index]
+                for face_index in reflection_faces:
+                    material = self.tracer.material_for_face(face_index)
+                    specular_energy *= (
+                        material.reflection_spectrum * material.specular_fraction
+                    )
                 if not np.any(specular_energy > 1e-12):
                     continue
 

@@ -8,7 +8,7 @@ from scene geometry using receiver-centric acoustic energy transport.
 Features:
 - Third-order ambisonic encoding with configurable orientation offsets
 - Deterministic direct/early paths and stochastic diffuse transport
-- Per-object acoustic materials with frequency-dependent properties
+- Per-material acoustic assignments with frequency-dependent object fallbacks
 - Russian roulette termination and frequency-dependent air absorption
 - Optional bounded edge diffraction
 """

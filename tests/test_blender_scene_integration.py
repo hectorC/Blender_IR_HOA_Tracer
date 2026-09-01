@@ -19,6 +19,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 import ir_raytracer  # noqa: E402
+from ir_raytracer.core.acoustics import MaterialProperties  # noqa: E402
 from ir_raytracer.core.ray_tracer import AmbisonicIREngine  # noqa: E402
 from ir_raytracer.utils.scene_utils import (  # noqa: E402
     build_acoustic_scene,
@@ -39,6 +40,8 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
     def setUp(self):
         for obj in list(bpy.data.objects):
             bpy.data.objects.remove(obj, do_unlink=True)
+        for material in list(bpy.data.materials):
+            bpy.data.materials.remove(material)
         scene = bpy.context.scene
         scene.airt_source_object = None
         scene.airt_receiver_object = None
@@ -90,6 +93,18 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
         wall.transmission = 0.0
         wall.transmission_bands = (0.0,) * 7
         return wall
+
+    def _acoustic_material(self, name, absorption, enabled=True):
+        material = bpy.data.materials.new(name)
+        material.airt_material_preset = 'CUSTOM'
+        material.absorption = absorption
+        material.absorption_bands = (absorption,) * 7
+        material.scatter = 0.0
+        material.scatter_bands = (0.0,) * 7
+        material.transmission = 0.0
+        material.transmission_bands = (0.0,) * 7
+        material.airt_acoustic_enabled = enabled
+        return material
 
     def _render(self, content):
         bpy.context.scene.airt_output_content = content
@@ -209,6 +224,153 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
         ])
         self.assertGreater(float(np.min(vertices[:, 0])), 1.9)
         self.assertGreater(float(np.max(vertices[:, 0])), 11.9)
+
+    def test_evaluated_faces_resolve_material_or_object_fallback(self):
+        enabled = self._acoustic_material("Enabled Acoustic", 0.8)
+        disabled = self._acoustic_material("Visual Only", 0.9, enabled=False)
+        mesh = bpy.data.meshes.new("Mixed Material Mesh")
+        mesh.from_pydata(
+            [
+                (0.0, 0.0, 0.0), (1.0, 0.0, 0.0),
+                (1.0, 1.0, 0.0), (0.0, 1.0, 0.0),
+                (2.0, 0.0, 0.0), (3.0, 0.0, 0.0),
+                (3.0, 1.0, 0.0), (2.0, 1.0, 0.0),
+            ],
+            [],
+            [(0, 1, 2, 3), (4, 5, 6, 7)],
+        )
+        mesh.materials.append(enabled)
+        mesh.materials.append(disabled)
+        mesh.polygons[0].material_index = 0
+        mesh.polygons[1].material_index = 1
+        obj = bpy.data.objects.new("Mixed Acoustic Surface", mesh)
+        bpy.context.scene.collection.objects.link(obj)
+        obj.airt_material_preset = 'CUSTOM'
+        obj.absorption = 0.1
+        obj.absorption_bands = (0.1,) * 7
+
+        faces = sorted(
+            (
+                face for face in build_acoustic_scene(bpy.context).faces
+                if face.object_ref == obj
+            ),
+            key=lambda face: sum(vertex.x for vertex in face.vertices),
+        )
+
+        self.assertEqual(len(faces), 2)
+        self.assertIs(faces[0].material_ref, enabled)
+        self.assertIs(faces[0].acoustic_ref, enabled)
+        np.testing.assert_allclose(
+            MaterialProperties(faces[0].acoustic_ref).absorption_spectrum,
+            0.8,
+        )
+        self.assertIs(faces[1].material_ref, disabled)
+        self.assertIs(faces[1].acoustic_ref, obj)
+        np.testing.assert_allclose(
+            MaterialProperties(faces[1].acoustic_ref).absorption_spectrum,
+            0.1,
+        )
+
+    def test_new_blender_materials_are_acoustically_disabled_by_default(self):
+        material = bpy.data.materials.new("Visual Material")
+
+        self.assertFalse(material.airt_acoustic_enabled)
+        self.assertEqual(material.airt_material_preset, 'CUSTOM')
+        self.assertAlmostEqual(material.absorption, 0.2)
+        self.assertAlmostEqual(material.scatter, 0.35)
+        self.assertAlmostEqual(material.transmission, 0.0)
+
+    def test_modifier_generated_faces_preserve_material_assignments(self):
+        primary = self._acoustic_material("Primary Acoustic", 0.2)
+        generated = self._acoustic_material("Generated Acoustic", 0.7)
+        bpy.ops.mesh.primitive_plane_add(size=2.0)
+        obj = bpy.context.object
+        obj.data.materials.append(primary)
+        obj.data.materials.append(generated)
+        modifier = obj.modifiers.new("Acoustic Thickness", 'SOLIDIFY')
+        modifier.thickness = 0.2
+        modifier.material_offset = 1
+        modifier.material_offset_rim = 1
+        bpy.context.view_layer.update()
+
+        faces = [
+            face for face in build_acoustic_scene(bpy.context).faces
+            if face.object_ref == obj
+        ]
+        assignments = {face.acoustic_ref for face in faces}
+
+        self.assertGreater(len(faces), 1)
+        self.assertIn(primary, assignments)
+        self.assertIn(generated, assignments)
+
+    def test_deterministic_reflection_uses_material_at_finite_hit(self):
+        absorbing = self._acoustic_material("Absorbing Half", 0.8)
+        reflective = self._acoustic_material("Reflective Half", 0.0)
+        mesh = bpy.data.meshes.new("Split Reflector")
+        mesh.from_pydata(
+            [
+                (-2.0, -2.0, 0.0), (0.0, -2.0, 0.0),
+                (0.0, 2.0, 0.0), (-2.0, 2.0, 0.0),
+                (0.0, -2.0, 0.0), (2.0, -2.0, 0.0),
+                (2.0, 2.0, 0.0), (0.0, 2.0, 0.0),
+            ],
+            [],
+            [(0, 1, 2, 3), (4, 5, 6, 7)],
+        )
+        mesh.materials.append(absorbing)
+        mesh.materials.append(reflective)
+        mesh.polygons[0].material_index = 0
+        mesh.polygons[1].material_index = 1
+        obj = bpy.data.objects.new("Split Reflector", mesh)
+        bpy.context.scene.collection.objects.link(obj)
+        scene = bpy.context.scene
+        scene.airt_output_content = 'REFLECTIONS'
+        scene.airt_early_order = 1
+
+        absorbing_events = AmbisonicIREngine(bpy.context)._first_order_specular_events(
+            Vector((-1.0, -0.5, 1.0)),
+            Vector((-1.0, 0.5, 1.0)),
+        )
+        reflective_events = AmbisonicIREngine(bpy.context)._first_order_specular_events(
+            Vector((1.0, -0.5, 1.0)),
+            Vector((1.0, 0.5, 1.0)),
+        )
+
+        self.assertEqual(len(absorbing_events), 1)
+        self.assertEqual(len(reflective_events), 1)
+        self.assertAlmostEqual(
+            float(
+                absorbing_events[0].energy_bands[0]
+                / reflective_events[0].energy_bands[0]
+            ),
+            0.2,
+            places=5,
+        )
+
+    def test_copy_settings_targets_active_blender_materials(self):
+        source_material = self._acoustic_material("Acoustic Source", 0.73)
+        target_material = self._acoustic_material(
+            "Acoustic Target", 0.1, enabled=False
+        )
+        bpy.ops.mesh.primitive_plane_add(size=1.0, location=(-1.0, 0.0, 0.0))
+        source = bpy.context.object
+        source.data.materials.append(source_material)
+        bpy.ops.mesh.primitive_plane_add(size=1.0, location=(1.0, 0.0, 0.0))
+        target = bpy.context.object
+        target.data.materials.append(target_material)
+        bpy.ops.object.select_all(action='DESELECT')
+        source.select_set(True)
+        target.select_set(True)
+        bpy.context.view_layer.objects.active = source
+
+        status = bpy.ops.airt.copy_material()
+
+        self.assertEqual(status, {'FINISHED'})
+        self.assertTrue(target_material.airt_acoustic_enabled)
+        np.testing.assert_allclose(
+            tuple(target_material.absorption_bands),
+            tuple(source_material.absorption_bands),
+        )
 
     def test_registered_defaults_are_a_balanced_listening_start(self):
         scene = bpy.data.scenes.new("Defaults Test")
@@ -389,6 +551,11 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
                 len(metadata["orientation"]["receiver_world_quaternion_wxyz"]),
                 4,
             )
+            self.assertEqual(len(metadata["acoustic_assignments"]), 1)
+            assignment = metadata["acoustic_assignments"][0]
+            self.assertEqual(assignment["type"], "OBJECT_FALLBACK")
+            self.assertEqual(assignment["name"], "Test Room")
+            self.assertGreater(assignment["evaluated_face_count"], 0)
 
 
 if __name__ == "__main__":

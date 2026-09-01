@@ -72,6 +72,12 @@ class EarlyPathClusteringTests(unittest.TestCase):
 
     def test_coplanar_triangles_share_one_sequence_surface(self):
         obj = SimpleNamespace(name="Triangulated Wall")
+        material_a = SimpleNamespace(
+            name="Left Finish", airt_acoustic_enabled=True
+        )
+        material_b = SimpleNamespace(
+            name="Right Finish", airt_acoustic_enabled=True
+        )
         faces = [
             AcousticFace(
                 vertices=(
@@ -81,6 +87,7 @@ class EarlyPathClusteringTests(unittest.TestCase):
                 ),
                 normal=Vector((0.0, 0.0, 1.0)),
                 object_ref=obj,
+                material_ref=material_a,
             ),
             AcousticFace(
                 vertices=(
@@ -90,6 +97,7 @@ class EarlyPathClusteringTests(unittest.TestCase):
                 ),
                 normal=Vector((0.0, 0.0, -1.0)),
                 object_ref=obj,
+                material_ref=material_b,
             ),
         ]
         surfaces = _build_specular_surfaces(AcousticScene(None, faces))

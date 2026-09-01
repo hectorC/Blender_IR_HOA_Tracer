@@ -12,6 +12,23 @@ class _AIRTPanel:
     bl_category = 'IR Tracer'
 
 
+def _draw_acoustic_coefficients(layout, owner):
+    layout.prop(owner, "airt_material_preset", text="Preset")
+    column = layout.column(align=True)
+    column.prop(owner, "absorption")
+    column.prop(owner, "scatter")
+    column.prop(owner, "transmission")
+    layout.prop(owner, "show_frequency_details", toggle=True)
+    if owner.show_frequency_details:
+        box = layout.box()
+        for index, label in enumerate(BAND_LABELS):
+            row = box.row(align=True)
+            row.label(text=label)
+            row.prop(owner, "absorption_bands", index=index, text="A")
+            row.prop(owner, "scatter_bands", index=index, text="S")
+            row.prop(owner, "transmission_bands", index=index, text="T")
+
+
 class AIRT_PT_Panel(_AIRTPanel, bpy.types.Panel):
     bl_idname = "AIRT_PT_main"
     bl_label = "Ambisonic IR Tracer"
@@ -49,26 +66,32 @@ class AIRT_PT_MaterialPanel(_AIRTPanel, bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         obj = context.active_object
-        layout.label(text=obj.name, icon='MESH_DATA')
-        layout.prop(obj, "airt_material_preset", text="Preset")
+        material = obj.active_material
+        if material is not None:
+            assignment = layout.box()
+            assignment.label(
+                text=f"Active Slot: {material.name}",
+                icon='MATERIAL',
+            )
+            assignment.prop(material, "airt_acoustic_enabled")
+            if material.airt_acoustic_enabled:
+                owner = material
+                layout.label(text="Editing Blender material", icon='MATERIAL')
+            else:
+                owner = obj
+                layout.label(
+                    text="Material acoustics disabled — editing object fallback",
+                    icon='INFO',
+                )
+        else:
+            owner = obj
+            layout.label(text=f"Object Fallback: {obj.name}", icon='MESH_DATA')
 
-        column = layout.column(align=True)
-        column.prop(obj, "absorption")
-        column.prop(obj, "scatter")
-        column.prop(obj, "transmission")
-        layout.prop(obj, "show_frequency_details", toggle=True)
-        if obj.show_frequency_details:
-            box = layout.box()
-            for index, label in enumerate(BAND_LABELS):
-                row = box.row(align=True)
-                row.label(text=label)
-                row.prop(obj, "absorption_bands", index=index, text="A")
-                row.prop(obj, "scatter_bands", index=index, text="S")
-                row.prop(obj, "transmission_bands", index=index, text="T")
+        _draw_acoustic_coefficients(layout, owner)
 
         row = layout.row(align=True)
         row.operator("airt.reset_material", text="Reset")
-        row.operator("airt.copy_material", text="Copy to Selected")
+        row.operator("airt.copy_material", text="Copy Settings")
 
 
 class AIRT_PT_AudioPanel(_AIRTPanel, bpy.types.Panel):

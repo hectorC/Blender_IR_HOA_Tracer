@@ -20,6 +20,17 @@ class AcousticFace:
     vertices: Tuple[mathutils.Vector, ...]
     normal: mathutils.Vector
     object_ref: Any
+    material_ref: Any = None
+
+    @property
+    def acoustic_ref(self) -> Any:
+        """Return an enabled Blender material or the legacy object fallback."""
+        if (
+            self.material_ref is not None
+            and bool(getattr(self.material_ref, 'airt_acoustic_enabled', False))
+        ):
+            return self.material_ref
+        return self.object_ref
 
 
 @dataclass
@@ -89,11 +100,22 @@ def build_acoustic_scene(context) -> AcousticScene:
                 if len(local_indices) < 3:
                     continue
                 face_vertices = tuple(world_vertices[index].copy() for index in local_indices)
+                material_index = int(polygon.material_index)
+                material_ref = (
+                    mesh.materials[material_index]
+                    if 0 <= material_index < len(mesh.materials)
+                    else None
+                )
+                if material_ref is not None:
+                    material_ref = getattr(
+                        material_ref, "original", material_ref
+                    )
                 polygons.append(tuple(base_index + index for index in local_indices))
                 faces.append(AcousticFace(
                     vertices=face_vertices,
                     normal=_face_normal(face_vertices),
                     object_ref=obj,
+                    material_ref=material_ref,
                 ))
         finally:
             obj_eval.to_mesh_clear()
@@ -221,7 +243,7 @@ def spectral_visibility(
         if not (0 <= face_index < len(acoustic_scene.faces)):
             return np.zeros(NUM_BANDS, dtype=np.float32)
 
-        material = MaterialProperties(acoustic_scene.faces[face_index].object_ref)
+        material = MaterialProperties(acoustic_scene.faces[face_index].acoustic_ref)
         gain *= material.transmission_spectrum
         if float(np.max(gain)) <= 1e-10:
             return np.zeros(NUM_BANDS, dtype=np.float32)

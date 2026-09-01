@@ -119,8 +119,8 @@ appropriate for quickly auditioning Wet or Diffuse IRs.
 
 ## Acoustic materials
 
-Each mesh object has seven energy-domain coefficient bands at 125, 250, 500,
-1,000, 2,000, 4,000, and 8,000 Hz:
+Each mesh object and opt-in Blender material has seven energy-domain
+coefficient bands at 125, 250, 500, 1,000, 2,000, 4,000, and 8,000 Hz:
 
 - **Absorption** removes incident energy.
 - **Scattering** divides reflected energy between diffuse and specular behavior.
@@ -129,8 +129,21 @@ Each mesh object has seven energy-domain coefficient bands at 125, 250, 500,
 For every band, reflected energy is clamped to
 `1 - absorption - transmission`; scattering only changes the distribution of
 that reflection. Presets are practical starting colors, not laboratory data for
-a particular commercial product. The **Copy to Selected** action makes it easy
-to apply one acoustic setup to several objects.
+a particular commercial product.
+
+The Acoustic Material panel follows the object's active Blender material slot.
+Enable **Use Material Acoustics** to store coefficients on that material and use
+them for every evaluated polygon assigned to it. Faces with no material, an
+invalid slot, or a material whose acoustic option is disabled use the mesh
+object's acoustic settings as a fallback. This opt-in behavior preserves the
+sound of existing scenes that already use Blender materials for appearance.
+
+Material assignment is read from the evaluated mesh, after modifiers. A
+modifier can therefore preserve or generate distinct acoustic material regions
+through its resulting material indices. A shared Blender material also shares
+one acoustic setup across every object that uses it. **Copy Settings** copies
+from the active material to the active materials of selected mesh objects, or
+between object fallbacks when material acoustics is not enabled.
 
 Thin transmissive surfaces are an artistic abstraction. A wall modeled with two
 faces can apply transmission twice, and the diffraction model handles one edge
@@ -165,8 +178,9 @@ receiver, render settings, normalization gain, and event counts.
 - Diffraction is a bounded, single-edge approximation and is disabled by
   default.
 - Point source and point receiver directivity are currently omnidirectional.
-- Acoustic coefficients are assigned per object, not per mesh face or Blender
-  material slot.
+- Acoustic assignment follows evaluated polygon material indices; modifier
+  configurations that discard or remap those indices necessarily change the
+  resulting acoustic assignment.
 - Stochastic tails converge progressively; identical nonzero seeds are
   repeatable, while seed zero intentionally creates a new realization.
 

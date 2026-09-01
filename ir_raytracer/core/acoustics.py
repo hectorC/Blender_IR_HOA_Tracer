@@ -85,7 +85,7 @@ MATERIAL_PRESETS = {
 
 def get_object_spectrum(obj: Any, vec_attr: str, scalar_attr: str, 
                        default_vec: Tuple[float, ...]) -> np.ndarray:
-    """Extract frequency spectrum from object properties."""
+    """Extract a frequency spectrum from an acoustic assignment owner."""
     if obj is None:
         return np.array(default_vec, dtype=np.float32)
     
@@ -356,7 +356,7 @@ class MaterialProperties:
     """Container for acoustic material properties."""
     
     def __init__(self, obj: Any = None):
-        """Initialize from Blender object or defaults."""
+        """Initialize from a Blender material, object fallback, or defaults."""
         if obj is None:
             self.absorption_spectrum = np.array(DEFAULT_ABSORPTION_SPECTRUM, dtype=np.float32)
             self.scatter_spectrum = np.array(DEFAULT_SCATTER_SPECTRUM, dtype=np.float32)
