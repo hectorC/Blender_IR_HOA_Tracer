@@ -52,7 +52,7 @@ Diagnostics panel can confirm that `soundfile` is available.
 3. Select an object at the listening position and choose **Use Active as
    Receiver**. Empty objects work well for both endpoints.
 4. Select each acoustic mesh and choose an Acoustic Material preset. Expand
-   **Band Details** only when frequency-specific shaping is wanted.
+   **Manual Band Details** when frequency-specific shaping is wanted.
 5. Choose IR content, duration, sample rate, quality, and an output path.
 6. Run **Validate Acoustic Scene**, then **Render Ambisonic IR**.
 
@@ -123,13 +123,38 @@ Each mesh object and opt-in Blender material has seven energy-domain
 coefficient bands at 125, 250, 500, 1,000, 2,000, 4,000, and 8,000 Hz:
 
 - **Absorption** removes incident energy.
-- **Scattering** divides reflected energy between diffuse and specular behavior.
+- **Unmodeled Scattering** divides reflected energy between diffuse and
+  specular behavior to represent surface detail absent from the acoustic mesh.
 - **Transmission** allows energy to continue through a surface.
 
 For every band, reflected energy is clamped to
 `1 - absorption - transmission`; scattering only changes the distribution of
-that reflection. Presets are practical starting colors, not laboratory data for
-a particular commercial product.
+that reflection. Presets describe explicit constructions such as smooth painted
+concrete, plaster on lath, carpet with underlay, or rough cave rock. They are
+practical starting colors based on published room-acoustic material data, not
+laboratory specifications for a particular commercial product. The source data
+and construction-specific variation can be explored in the [ODEON material
+library](https://odeon.dk/download/materials/Material.Li8).
+
+Named presets are refreshed from the current library whenever a file loads, so
+calibration improvements also reach existing named assignments. Materials set
+to Custom retain their saved coefficients unchanged.
+
+Evaluated mesh relief already changes reflection directions and must not be
+counted again as material scattering. Use higher scattering when a simplified
+surface stands in for missing joints, fractures, folds, seating, or other
+detail; reduce it when those features are present in the mesh. Modifiers that
+produce real evaluated geometry are included. Shader bump and normal maps are
+visual only and can instead be represented by unmodeled scattering. Published
+scattering guidance also varies strongly with the physical depth of unresolved
+surface structure; see the [ODEON scattering
+guidance](https://odeon.dk/pdf/ODEONManual12.pdf).
+
+The broadband controls set all seven bands to one value. **Manual Band
+Details** remain authoritative: editing an individual band preserves the
+frequency-dependent curve and changes the preset to Custom. Transmission is
+zero in the presets because transmission belongs to an entire wall assembly,
+including thickness and backing, rather than only its visible finish.
 
 The Acoustic Material panel follows the object's active Blender material slot.
 Enable **Use Material Acoustics** to store coefficients on that material and use

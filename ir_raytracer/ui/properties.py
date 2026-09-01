@@ -2,8 +2,15 @@
 from __future__ import annotations
 
 import bpy
+from bpy.app.handlers import persistent
 
-from ..core.acoustics import MATERIAL_PRESET_DATA, MATERIAL_PRESETS, NUM_BANDS
+from ..core.acoustics import (
+    DEFAULT_ABSORPTION_SPECTRUM,
+    DEFAULT_SCATTER_SPECTRUM,
+    MATERIAL_PRESET_DATA,
+    MATERIAL_PRESETS,
+    NUM_BANDS,
+)
 
 
 _MATERIAL_GUARD = set()
@@ -44,20 +51,28 @@ QUALITY_PROFILES = {
 
 def _material_items():
     items = [('CUSTOM', 'Custom', 'User-defined acoustic coefficients')]
-    for identifier, label, _absorption, _scatter in MATERIAL_PRESET_DATA:
+    for (
+        identifier, label, description, _absorption, _scatter
+    ) in MATERIAL_PRESET_DATA:
         preset = MATERIAL_PRESETS[identifier]
         items.append((
             identifier,
             label,
-            f"Average absorption {preset['absorption']:.2f}, scattering {preset['scatter']:.2f}",
+            (
+                f"{description}. Average absorption "
+                f"{preset['absorption']:.2f}, unmodeled scattering "
+                f"{preset['scatter']:.2f}"
+            ),
         ))
     return items
 
 
-def _update_material_preset(self, _context):
+def _apply_material_preset(owner):
+    """Apply the canonical coefficients for one named preset owner."""
+    self = owner
     preset = MATERIAL_PRESETS.get(getattr(self, 'airt_material_preset', 'CUSTOM'))
     if preset is None:
-        return
+        return False
     key = id(self)
     _MATERIAL_GUARD.add(key)
     try:
@@ -71,13 +86,80 @@ def _update_material_preset(self, _context):
         self.transmission_bands = tuple(0.0 for _ in range(NUM_BANDS))
     finally:
         _MATERIAL_GUARD.discard(key)
+    return True
 
 
-def _mark_material_custom(self, _context):
+def _update_material_preset(self, _context):
+    _apply_material_preset(self)
+
+
+@persistent
+def _refresh_named_material_presets(_unused):
+    """Refresh named presets after a file load; leave Custom owners intact."""
+    for owner in tuple(bpy.data.objects) + tuple(bpy.data.materials):
+        if hasattr(owner, 'airt_material_preset'):
+            _apply_material_preset(owner)
+
+
+def _enable_material_acoustics(self):
     if hasattr(self, 'airt_acoustic_enabled'):
         self.airt_acoustic_enabled = True
-    if id(self) not in _MATERIAL_GUARD and self.airt_material_preset != 'CUSTOM':
-        self.airt_material_preset = 'CUSTOM'
+
+
+def _update_broadband_value(self, scalar_attr, vector_attr):
+    """Apply a broadband edit uniformly to the authoritative band values."""
+    _enable_material_acoustics(self)
+    key = id(self)
+    if key in _MATERIAL_GUARD:
+        return
+    _MATERIAL_GUARD.add(key)
+    try:
+        value = float(getattr(self, scalar_attr))
+        setattr(self, vector_attr, tuple(value for _ in range(NUM_BANDS)))
+        if self.airt_material_preset != 'CUSTOM':
+            self.airt_material_preset = 'CUSTOM'
+    finally:
+        _MATERIAL_GUARD.discard(key)
+
+
+def _update_band_values(self, scalar_attr, vector_attr):
+    """Keep the broadband display in sync without flattening manual bands."""
+    _enable_material_acoustics(self)
+    key = id(self)
+    if key in _MATERIAL_GUARD:
+        return
+    _MATERIAL_GUARD.add(key)
+    try:
+        values = tuple(float(value) for value in getattr(self, vector_attr))
+        setattr(self, scalar_attr, sum(values) / max(len(values), 1))
+        if self.airt_material_preset != 'CUSTOM':
+            self.airt_material_preset = 'CUSTOM'
+    finally:
+        _MATERIAL_GUARD.discard(key)
+
+
+def _update_absorption(self, _context):
+    _update_broadband_value(self, 'absorption', 'absorption_bands')
+
+
+def _update_absorption_bands(self, _context):
+    _update_band_values(self, 'absorption', 'absorption_bands')
+
+
+def _update_scatter(self, _context):
+    _update_broadband_value(self, 'scatter', 'scatter_bands')
+
+
+def _update_scatter_bands(self, _context):
+    _update_band_values(self, 'scatter', 'scatter_bands')
+
+
+def _update_transmission(self, _context):
+    _update_broadband_value(self, 'transmission', 'transmission_bands')
+
+
+def _update_transmission_bands(self, _context):
+    _update_band_values(self, 'transmission', 'transmission_bands')
 
 
 def _register_acoustic_owner_props(owner):
@@ -91,11 +173,11 @@ def _register_acoustic_owner_props(owner):
     )
     owner.absorption = bpy.props.FloatProperty(
         name="Absorption",
-        description="Broadband absorbed-energy fraction",
-        default=0.2,
+        description="Set every absorption band to this absorbed-energy fraction",
+        default=sum(DEFAULT_ABSORPTION_SPECTRUM) / NUM_BANDS,
         min=0.0,
         max=1.0,
-        update=_mark_material_custom,
+        update=_update_absorption,
     )
     owner.absorption_bands = bpy.props.FloatVectorProperty(
         name="Absorption Bands",
@@ -103,33 +185,39 @@ def _register_acoustic_owner_props(owner):
         size=NUM_BANDS,
         min=0.0,
         max=1.0,
-        default=tuple(0.2 for _ in range(NUM_BANDS)),
-        update=_mark_material_custom,
+        default=DEFAULT_ABSORPTION_SPECTRUM,
+        update=_update_absorption_bands,
     )
     owner.scatter = bpy.props.FloatProperty(
-        name="Scattering",
-        description="Fraction of reflected energy distributed diffusely",
-        default=0.35,
+        name="Unmodeled Scattering",
+        description=(
+            "Set every scattering band to the fraction of reflected energy "
+            "diffused by surface detail absent from the evaluated mesh"
+        ),
+        default=sum(DEFAULT_SCATTER_SPECTRUM) / NUM_BANDS,
         min=0.0,
         max=1.0,
-        update=_mark_material_custom,
+        update=_update_scatter,
     )
     owner.scatter_bands = bpy.props.FloatVectorProperty(
-        name="Scattering Bands",
-        description="Diffuse-reflection fraction at 125 Hz through 8 kHz",
+        name="Unmodeled Scattering Bands",
+        description=(
+            "Diffuse-reflection fraction caused by detail absent from the "
+            "evaluated mesh, at 125 Hz through 8 kHz"
+        ),
         size=NUM_BANDS,
         min=0.0,
         max=1.0,
-        default=tuple(0.35 for _ in range(NUM_BANDS)),
-        update=_mark_material_custom,
+        default=DEFAULT_SCATTER_SPECTRUM,
+        update=_update_scatter_bands,
     )
     owner.transmission = bpy.props.FloatProperty(
         name="Transmission",
-        description="Broadband energy fraction passing through the surface",
+        description="Set every transmission band to this transmitted-energy fraction",
         default=0.0,
         min=0.0,
         max=1.0,
-        update=_mark_material_custom,
+        update=_update_transmission,
     )
     owner.transmission_bands = bpy.props.FloatVectorProperty(
         name="Transmission Bands",
@@ -138,10 +226,14 @@ def _register_acoustic_owner_props(owner):
         min=0.0,
         max=1.0,
         default=tuple(0.0 for _ in range(NUM_BANDS)),
-        update=_mark_material_custom,
+        update=_update_transmission_bands,
     )
     owner.show_frequency_details = bpy.props.BoolProperty(
-        name="Band Details",
+        name="Manual Band Details",
+        description=(
+            "Edit the authoritative absorption, unmodeled-scattering, and "
+            "transmission values independently for each frequency band"
+        ),
         default=False,
     )
 
@@ -418,9 +510,14 @@ def register_acoustic_props():
         name="Last Render",
         default="",
     )
+    if _refresh_named_material_presets not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_refresh_named_material_presets)
+    _refresh_named_material_presets(None)
 
 
 def unregister_acoustic_props():
+    if _refresh_named_material_presets in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_refresh_named_material_presets)
     acoustic_owner_names = (
         'airt_material_preset', 'absorption', 'absorption_bands', 'scatter',
         'scatter_bands', 'transmission', 'transmission_bands',

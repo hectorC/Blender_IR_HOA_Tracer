@@ -18,9 +18,14 @@ def _draw_acoustic_coefficients(layout, owner):
     column.prop(owner, "absorption")
     column.prop(owner, "scatter")
     column.prop(owner, "transmission")
+    layout.label(
+        text="Scattering represents detail absent from the mesh",
+        icon='INFO',
+    )
     layout.prop(owner, "show_frequency_details", toggle=True)
     if owner.show_frequency_details:
         box = layout.box()
+        box.label(text="Manual bands: A / S / T")
         for index, label in enumerate(BAND_LABELS):
             row = box.row(align=True)
             row.label(text=label)

@@ -19,7 +19,11 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 import ir_raytracer  # noqa: E402
-from ir_raytracer.core.acoustics import MaterialProperties  # noqa: E402
+from ir_raytracer.core.acoustics import (  # noqa: E402
+    DEFAULT_SCATTER_SPECTRUM,
+    MATERIAL_PRESETS,
+    MaterialProperties,
+)
 from ir_raytracer.core.ray_tracer import AmbisonicIREngine  # noqa: E402
 from ir_raytracer.utils.scene_utils import (  # noqa: E402
     build_acoustic_scene,
@@ -277,8 +281,39 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
         self.assertFalse(material.airt_acoustic_enabled)
         self.assertEqual(material.airt_material_preset, 'CUSTOM')
         self.assertAlmostEqual(material.absorption, 0.2)
-        self.assertAlmostEqual(material.scatter, 0.35)
+        self.assertAlmostEqual(
+            material.scatter,
+            sum(DEFAULT_SCATTER_SPECTRUM) / len(DEFAULT_SCATTER_SPECTRUM),
+        )
+        np.testing.assert_allclose(
+            tuple(material.scatter_bands),
+            DEFAULT_SCATTER_SPECTRUM,
+        )
         self.assertAlmostEqual(material.transmission, 0.0)
+
+    def test_broadband_and_manual_band_edits_stay_synchronized(self):
+        material = bpy.data.materials.new("Editable Acoustic Material")
+        material.airt_material_preset = 'ROCK_CAVE'
+        cave = MATERIAL_PRESETS['ROCK_CAVE']
+
+        self.assertTrue(material.airt_acoustic_enabled)
+        np.testing.assert_allclose(
+            tuple(material.scatter_bands),
+            cave['scatter_spectrum'],
+        )
+        self.assertAlmostEqual(material.scatter, cave['scatter'])
+
+        material.scatter = 0.25
+        self.assertEqual(material.airt_material_preset, 'CUSTOM')
+        np.testing.assert_allclose(tuple(material.scatter_bands), 0.25)
+
+        material.airt_material_preset = 'ROCK_CAVE'
+        manual_bands = list(material.scatter_bands)
+        manual_bands[0] = 0.33
+        material.scatter_bands = manual_bands
+        self.assertEqual(material.airt_material_preset, 'CUSTOM')
+        np.testing.assert_allclose(tuple(material.scatter_bands), manual_bands)
+        self.assertAlmostEqual(material.scatter, sum(manual_bands) / 7.0)
 
     def test_modifier_generated_faces_preserve_material_assignments(self):
         primary = self._acoustic_material("Primary Acoustic", 0.2)
@@ -370,6 +405,30 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
         np.testing.assert_allclose(
             tuple(target_material.absorption_bands),
             tuple(source_material.absorption_bands),
+        )
+
+    def test_copy_settings_preserves_named_preset_state(self):
+        source_material = bpy.data.materials.new("Named Acoustic Source")
+        source_material.airt_material_preset = 'ROCK_CAVE'
+        target_material = bpy.data.materials.new("Named Acoustic Target")
+        bpy.ops.mesh.primitive_plane_add(size=1.0, location=(-1.0, 0.0, 0.0))
+        source = bpy.context.object
+        source.data.materials.append(source_material)
+        bpy.ops.mesh.primitive_plane_add(size=1.0, location=(1.0, 0.0, 0.0))
+        target = bpy.context.object
+        target.data.materials.append(target_material)
+        bpy.ops.object.select_all(action='DESELECT')
+        source.select_set(True)
+        target.select_set(True)
+        bpy.context.view_layer.objects.active = source
+
+        status = bpy.ops.airt.copy_material()
+
+        self.assertEqual(status, {'FINISHED'})
+        self.assertEqual(target_material.airt_material_preset, 'ROCK_CAVE')
+        np.testing.assert_allclose(
+            tuple(target_material.scatter_bands),
+            MATERIAL_PRESETS['ROCK_CAVE']['scatter_spectrum'],
         )
 
     def test_registered_defaults_are_a_balanced_listening_start(self):

@@ -8,7 +8,12 @@ import sys
 import bpy
 import numpy as np
 
-from ..core.acoustics import BAND_CENTERS_HZ, NUM_BANDS
+from ..core.acoustics import (
+    BAND_CENTERS_HZ,
+    DEFAULT_ABSORPTION_SPECTRUM,
+    DEFAULT_SCATTER_SPECTRUM,
+    NUM_BANDS,
+)
 from ..core.ambisonic import get_ambi_channel_names
 from ..core.ray_tracer import AcousticRenderConfig, AmbisonicIREngine
 from ..utils.scene_utils import (
@@ -340,11 +345,11 @@ class AIRT_OT_ResetMaterial(bpy.types.Operator):
             else obj
         )
         owner.airt_material_preset = 'CUSTOM'
-        owner.absorption = 0.2
-        owner.scatter = 0.35
+        owner.absorption = sum(DEFAULT_ABSORPTION_SPECTRUM) / NUM_BANDS
+        owner.scatter = sum(DEFAULT_SCATTER_SPECTRUM) / NUM_BANDS
         owner.transmission = 0.0
-        owner.absorption_bands = tuple(0.2 for _ in range(NUM_BANDS))
-        owner.scatter_bands = tuple(0.35 for _ in range(NUM_BANDS))
+        owner.absorption_bands = DEFAULT_ABSORPTION_SPECTRUM
+        owner.scatter_bands = DEFAULT_SCATTER_SPECTRUM
         owner.transmission_bands = tuple(0.0 for _ in range(NUM_BANDS))
         return {'FINISHED'}
 
@@ -387,13 +392,15 @@ class AIRT_OT_CopyMaterial(bpy.types.Operator):
             self.report({'ERROR'}, "Selected targets have no distinct active assignment")
             return {'CANCELLED'}
         for target in targets:
-            target.airt_material_preset = source.airt_material_preset
             target.absorption = source.absorption
             target.scatter = source.scatter
             target.transmission = source.transmission
             target.absorption_bands = tuple(source.absorption_bands)
             target.scatter_bands = tuple(source.scatter_bands)
             target.transmission_bands = tuple(source.transmission_bands)
+            # Apply the identifier last. Named presets then finish in their
+            # canonical state; Custom retains the copied manual curves.
+            target.airt_material_preset = source.airt_material_preset
         assignment = "material(s)" if using_material else "object fallback(s)"
         self.report({'INFO'}, f"Copied acoustic settings to {len(targets)} {assignment}")
         return {'FINISHED'}

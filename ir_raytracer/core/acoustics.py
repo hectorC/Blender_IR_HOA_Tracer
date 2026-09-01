@@ -14,46 +14,168 @@ NUM_BANDS = len(BAND_CENTERS_HZ)
 
 # Default material properties
 DEFAULT_ABSORPTION_SPECTRUM = tuple(0.2 for _ in BAND_CENTERS_HZ)
-DEFAULT_SCATTER_SPECTRUM = tuple(0.35 for _ in BAND_CENTERS_HZ)
+DEFAULT_SCATTER_SPECTRUM = (0.02, 0.03, 0.04, 0.05, 0.08, 0.12, 0.18)
 
-# Material presets
+# Material presets. Absorption is an energy coefficient for the complete named
+# surface construction. Scattering represents unresolved surface detail only;
+# relief already present in evaluated Blender geometry must not be counted a
+# second time. The values are practical room-acoustic starting points rather
+# than specifications for an individual commercial product.
 MATERIAL_PRESET_DATA = [
     (
         'WOOD',
-        'Wood (panel)',
-        (0.18, 0.17, 0.16, 0.14, 0.12, 0.10, 0.10),
-        (0.30, 0.32, 0.34, 0.36, 0.38, 0.38, 0.38)
+        'Wood Panel on Framing',
+        'Cavity-backed wood panel; seams and fine relief are not modeled',
+        (0.18, 0.12, 0.10, 0.09, 0.08, 0.07, 0.06),
+        (0.02, 0.03, 0.04, 0.06, 0.10, 0.16, 0.24),
+    ),
+    (
+        'WOOD_SOLID',
+        'Wood - Solid/Hard-Backed',
+        'Parquet or solid wood fixed to a hard backing',
+        (0.04, 0.04, 0.07, 0.06, 0.06, 0.07, 0.08),
+        (0.01, 0.02, 0.03, 0.04, 0.06, 0.10, 0.16),
     ),
     (
         'CONCRETE',
-        'Concrete',
-        (0.02, 0.02, 0.03, 0.04, 0.05, 0.05, 0.06),
-        (0.10, 0.12, 0.14, 0.16, 0.18, 0.18, 0.18)
+        'Concrete - Rough/Unsealed',
+        'Ordinary unfinished concrete with shallow unresolved texture',
+        (0.02, 0.03, 0.03, 0.03, 0.04, 0.07, 0.07),
+        (0.03, 0.04, 0.06, 0.09, 0.14, 0.22, 0.32),
+    ),
+    (
+        'CONCRETE_SMOOTH',
+        'Concrete - Smooth/Painted',
+        'Sealed, painted, or glazed concrete',
+        (0.01, 0.01, 0.01, 0.02, 0.02, 0.02, 0.02),
+        (0.005, 0.007, 0.01, 0.015, 0.025, 0.04, 0.07),
     ),
     (
         'PLASTER',
-        'Plaster',
-        (0.14, 0.10, 0.06, 0.05, 0.04, 0.05, 0.05),
-        (0.10, 0.12, 0.14, 0.16, 0.18, 0.20, 0.22)
+        'Plaster on Lath',
+        'Smooth plaster on a lightweight lath or framed construction',
+        (0.14, 0.10, 0.06, 0.04, 0.04, 0.03, 0.02),
+        (0.01, 0.015, 0.02, 0.03, 0.05, 0.08, 0.12),
+    ),
+    (
+        'PLASTER_SOLID',
+        'Plaster - Smooth on Masonry',
+        'Lime or cement plaster applied to a solid backing',
+        (0.02, 0.02, 0.03, 0.04, 0.05, 0.05, 0.05),
+        (0.01, 0.015, 0.02, 0.03, 0.05, 0.08, 0.12),
     ),
     (
         'CARPET',
-        'Carpet',
-        (0.08, 0.12, 0.30, 0.55, 0.65, 0.70, 0.70),
-        (0.55, 0.57, 0.60, 0.62, 0.62, 0.62, 0.62)
+        'Carpet - Heavy with Underlay',
+        'Heavy carpet over felt or open-cell foam underlay',
+        (0.08, 0.24, 0.57, 0.69, 0.71, 0.73, 0.75),
+        (0.02, 0.03, 0.04, 0.06, 0.10, 0.16, 0.24),
+    ),
+    (
+        'CARPET_HARD',
+        'Carpet - Bonded to Concrete',
+        'Heavy carpet directly bonded to a hard floor',
+        (0.02, 0.06, 0.14, 0.37, 0.60, 0.65, 0.70),
+        (0.02, 0.03, 0.04, 0.06, 0.10, 0.16, 0.24),
     ),
     (
         'TILE',
-        'Tile',
-        (0.01, 0.01, 0.02, 0.02, 0.03, 0.04, 0.05),
-        (0.15, 0.17, 0.18, 0.20, 0.22, 0.22, 0.22)
+        'Glazed Tile / Polished Stone',
+        'Smooth glazed ceramic, marble, or polished dense stone',
+        (0.01, 0.01, 0.01, 0.01, 0.02, 0.02, 0.02),
+        (0.005, 0.008, 0.01, 0.015, 0.025, 0.04, 0.07),
     ),
     (
         'BRICK',
-        'Brick',
-        (0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09),
-        (0.35, 0.37, 0.40, 0.43, 0.45, 0.45, 0.45)
-    )
+        'Brick - Flush Joints',
+        'Unglazed brickwork with filled or flush mortar joints',
+        (0.03, 0.03, 0.03, 0.04, 0.05, 0.07, 0.09),
+        (0.03, 0.04, 0.06, 0.09, 0.15, 0.24, 0.35),
+    ),
+    (
+        'BRICK_OPEN',
+        'Brick - Open/Deep Joints',
+        'Brickwork with recessed or open joints absent from the mesh',
+        (0.08, 0.09, 0.12, 0.16, 0.22, 0.24, 0.26),
+        (0.06, 0.08, 0.11, 0.15, 0.24, 0.36, 0.50),
+    ),
+    (
+        'GLASS',
+        'Glass - Large Pane',
+        'Large smooth glazing; low-frequency loss includes panel motion',
+        (0.18, 0.06, 0.04, 0.03, 0.02, 0.02, 0.02),
+        (0.005, 0.007, 0.01, 0.015, 0.025, 0.04, 0.07),
+    ),
+    (
+        'METAL',
+        'Metal - Smooth Solid',
+        'Massive smooth metal without perforation or a resonant cavity',
+        (0.01, 0.01, 0.01, 0.01, 0.02, 0.02, 0.02),
+        (0.005, 0.007, 0.01, 0.015, 0.025, 0.04, 0.07),
+    ),
+    (
+        'ROCK_DENSE',
+        'Rock - Dense/Smooth',
+        'Dense solid rock with only shallow unmodeled texture',
+        (0.01, 0.01, 0.02, 0.02, 0.03, 0.04, 0.05),
+        (0.01, 0.02, 0.03, 0.05, 0.08, 0.14, 0.22),
+    ),
+    (
+        'ROCK_CAVE',
+        'Rock - Rough Cave',
+        'Irregular cave wall whose smaller fractures are absent from the mesh',
+        (0.03, 0.03, 0.04, 0.05, 0.06, 0.08, 0.10),
+        (0.08, 0.12, 0.20, 0.32, 0.48, 0.65, 0.78),
+    ),
+    (
+        'ROCK_POROUS',
+        'Rock - Porous/Weathered',
+        'Fractured or porous exposed rock with lossy small-scale structure',
+        (0.06, 0.08, 0.10, 0.13, 0.17, 0.22, 0.28),
+        (0.10, 0.16, 0.25, 0.38, 0.52, 0.68, 0.80),
+    ),
+    (
+        'GRAVEL',
+        'Gravel / Crushed Rock Bed',
+        'Loose crushed stone bed approximately 150 mm deep',
+        (0.19, 0.23, 0.43, 0.37, 0.58, 0.62, 0.66),
+        (0.12, 0.20, 0.32, 0.48, 0.62, 0.72, 0.80),
+    ),
+    (
+        'SAND',
+        'Sand / Loose Soil',
+        'Loose granular ground approximately 100 mm deep',
+        (0.15, 0.35, 0.40, 0.50, 0.55, 0.80, 1.00),
+        (0.05, 0.08, 0.14, 0.22, 0.34, 0.48, 0.62),
+    ),
+    (
+        'CURTAIN_HEAVY',
+        'Curtain - Heavy Folded',
+        'Heavy velour with folds represented by material scattering',
+        (0.14, 0.35, 0.55, 0.72, 0.70, 0.65, 0.60),
+        (0.08, 0.12, 0.18, 0.28, 0.40, 0.50, 0.58),
+    ),
+    (
+        'MINERAL_WOOL',
+        'Mineral Wool - 50 mm',
+        'Exposed 50 mm porous absorber mounted against a wall',
+        (0.15, 0.70, 0.60, 0.60, 0.85, 0.90, 0.95),
+        (0.02, 0.03, 0.04, 0.06, 0.10, 0.15, 0.20),
+    ),
+    (
+        'WATER',
+        'Water - Calm Surface',
+        'Calm open water with no modeled waves',
+        (0.01, 0.01, 0.01, 0.01, 0.02, 0.02, 0.02),
+        (0.005, 0.005, 0.01, 0.015, 0.02, 0.03, 0.05),
+    ),
+    (
+        'AUDIENCE',
+        'Audience - Upholstered Seating',
+        'Area approximation for people and medium upholstered seating',
+        (0.56, 0.64, 0.70, 0.72, 0.68, 0.62, 0.56),
+        (0.45, 0.55, 0.62, 0.67, 0.70, 0.72, 0.74),
+    ),
 ]
 
 
@@ -79,7 +201,7 @@ MATERIAL_PRESETS = {
         'absorption': _avg(absorption),
         'scatter': _avg(scatter)
     }
-    for identifier, _, absorption, scatter in MATERIAL_PRESET_DATA
+    for identifier, _, _, absorption, scatter in MATERIAL_PRESET_DATA
 }
 
 
