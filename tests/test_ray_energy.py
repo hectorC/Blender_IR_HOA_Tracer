@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -31,6 +32,8 @@ def _config(ray_count=1):
         duration_seconds=1.0,
         output_content='DIFFUSE',
         early_reflections=False,
+        early_order=2,
+        early_path_budget=1_000_000,
         seed=1,
         min_energy=1e-8,
         rr_enabled=False,
@@ -158,6 +161,46 @@ class RayEnergyTests(unittest.TestCase):
             direction, normal, material, np.ones(NUM_BANDS)
         )
         self.assertIsNotNone(sampled)
+
+    def test_stochastic_stage_omits_only_covered_all_specular_paths(self):
+        material = MaterialProperties(SimpleNamespace(
+            absorption_bands=(0.0,) * NUM_BANDS,
+            scatter_bands=(0.0,) * NUM_BANDS,
+            transmission=0.0,
+            transmission_bands=(0.0,) * NUM_BANDS,
+        ))
+        config = replace(
+            _config(128),
+            output_content='REFLECTIONS',
+            early_reflections=True,
+            early_order=2,
+        )
+        tracer = ReceiverPathTracer(config, AcousticScene(None, []))
+        tracer.deterministic_specular_order = 2
+        arguments = dict(
+            hit_point=Vector((0.0, 0.0, 0.0)),
+            normal=Vector((0.0, 0.0, 1.0)),
+            reverse_direction=Vector((0.0, 0.0, -1.0)),
+            source=Vector((0.0, 0.0, 1.0)),
+            path_distance_bu=1.0,
+            throughput=np.ones(NUM_BANDS),
+            material=material,
+            first_direction=Vector((1.0, 0.0, 0.0)),
+        )
+
+        covered = tracer._source_connection(
+            **arguments, bounce=1, all_prior_specular=True
+        )
+        mixed = tracer._source_connection(
+            **arguments, bounce=1, all_prior_specular=False
+        )
+        beyond_order = tracer._source_connection(
+            **arguments, bounce=2, all_prior_specular=True
+        )
+
+        self.assertIsNone(covered)
+        self.assertIsNotNone(mixed)
+        self.assertIsNotNone(beyond_order)
 
 
 if __name__ == "__main__":

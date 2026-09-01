@@ -141,6 +141,8 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
                 "scene_unit_scale_metres": config.unit_scale,
                 "speed_of_sound_bu_per_second": config.speed_of_sound_bu,
                 "deterministic_early_reflections": config.early_reflections,
+                "deterministic_reflection_order": config.early_order,
+                "deterministic_path_budget": config.early_path_budget,
                 "early_gain_db": config.early_gain_db,
                 "diffuse_gain_db": config.diffuse_gain_db,
                 "air": {
@@ -165,6 +167,18 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
                     "early": result.synthesis.early_events,
                     "diffuse": result.synthesis.diffuse_events,
                 },
+                "deterministic_path_stats": {
+                    "surface_sequences_tested": result.transport.early_sequences_tested,
+                    "highest_order_evaluated": result.transport.early_highest_order,
+                    "orders_skipped_by_budget": result.transport.early_orders_skipped,
+                    "events_by_order": {
+                        str(order): sum(
+                            event.kind == 'EARLY' and event.order == order
+                            for event in result.events
+                        )
+                        for order in range(1, config.early_order + 1)
+                    },
+                },
             }
             with open(output_path + ".json", "w", encoding="utf-8") as metadata_file:
                 json.dump(metadata, metadata_file, indent=2)
@@ -178,6 +192,11 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
             f"{result.synthesis.diffuse_events} diffuse events"
         )
         scene.airt_last_render_summary = summary
+        if result.transport.early_orders_skipped:
+            self.report({'WARNING'}, (
+                "Deterministic early reflections reached the path budget; "
+                f"highest completed order was {result.transport.early_highest_order}"
+            ))
         self.report({'INFO'}, f"Saved {os.path.basename(output_path)} — {summary}")
         return {'FINISHED'}
 

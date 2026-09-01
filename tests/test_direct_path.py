@@ -29,6 +29,8 @@ def _config(content: str) -> AcousticRenderConfig:
         duration_seconds=0.1,
         output_content=content,
         early_reflections=True,
+        early_order=2,
+        early_path_budget=1_000_000,
         seed=1,
         min_energy=1e-8,
         rr_enabled=False,

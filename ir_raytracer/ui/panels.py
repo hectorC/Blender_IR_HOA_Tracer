@@ -88,7 +88,10 @@ class AIRT_PT_AudioPanel(_AIRTPanel, bpy.types.Panel):
         early = layout.box()
         early.enabled = scene.airt_output_content != 'DIFFUSE'
         early.prop(scene, "airt_early_reflections")
-        early.prop(scene, "airt_early_gain_db")
+        early_settings = early.column(align=True)
+        early_settings.enabled = scene.airt_early_reflections
+        early_settings.prop(scene, "airt_early_order")
+        early_settings.prop(scene, "airt_early_gain_db")
         layout.prop(scene, "airt_diffuse_gain_db")
 
         output = layout.box()
@@ -123,6 +126,15 @@ class AIRT_PT_AdvancedPanel(_AIRTPanel, bpy.types.Panel):
             row = sampling.row(align=True)
             row.prop(scene, "airt_rr_start")
             row.prop(scene, "airt_rr_p")
+
+        if scene.airt_early_reflections:
+            deterministic = layout.box()
+            deterministic.label(text="Deterministic Specular Paths")
+            deterministic.prop(scene, "airt_early_path_budget")
+            deterministic.label(
+                text="Higher orders grow rapidly with reflector count",
+                icon='INFO',
+            )
 
         air = layout.box()
         air.prop(scene, "airt_air_enable")

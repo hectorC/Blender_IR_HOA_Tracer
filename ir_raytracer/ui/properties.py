@@ -239,8 +239,25 @@ def register_acoustic_props():
     )
     scene.airt_early_reflections = bpy.props.BoolProperty(
         name="Deterministic Early Reflections",
-        description="Resolve first-order planar specular reflections explicitly",
+        description="Resolve coherent planar specular reflections explicitly",
         default=True,
+    )
+    scene.airt_early_order = bpy.props.IntProperty(
+        name="Specular Order",
+        description="Maximum number of deterministic image-source reflections",
+        default=2,
+        min=1,
+        max=3,
+    )
+    scene.airt_early_path_budget = bpy.props.IntProperty(
+        name="Early Path Budget",
+        description=(
+            "Maximum candidate surface sequences per higher image-source order; "
+            "orders above this budget are reported and omitted"
+        ),
+        default=1_000_000,
+        min=1_000,
+        max=20_000_000,
     )
     scene.airt_early_gain_db = bpy.props.FloatProperty(
         name="Early Gain",
@@ -388,8 +405,9 @@ def unregister_acoustic_props():
     scene_names = (
         'airt_source_object', 'airt_receiver_object', 'airt_quality_preset',
         'airt_num_rays', 'airt_max_order', 'airt_sr', 'airt_ir_seconds',
-        'airt_output_content', 'airt_early_reflections', 'airt_early_gain_db',
-        'airt_diffuse_gain_db', 'airt_seed', 'airt_spec_rough_deg',
+        'airt_output_content', 'airt_early_reflections', 'airt_early_order',
+        'airt_early_path_budget', 'airt_early_gain_db', 'airt_diffuse_gain_db',
+        'airt_seed', 'airt_spec_rough_deg',
         'airt_rr_enable', 'airt_rr_start', 'airt_rr_p', 'airt_min_throughput',
         'airt_air_enable', 'airt_air_temp_c', 'airt_air_humidity',
         'airt_air_pressure_kpa', 'airt_enable_diffraction',

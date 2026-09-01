@@ -19,9 +19,11 @@ Version 2 uses one receiver-centric acoustic energy renderer. It no longer
 crossfades unrelated forward and reverse simulations.
 
 - Direct sound is evaluated deterministically, including per-band transmission.
-- First-order planar specular reflections are found with image sources.
-- Higher-order reflected energy is sampled from the receiver with diffuse,
-  glossy, absorptive, and transmissive surface interactions.
+- Planar specular reflections are found deterministically with finite image
+  sources through a selectable first, second, or third order.
+- Remaining reflected energy is sampled from the receiver with diffuse,
+  glossy, absorptive, and transmissive surface interactions. All-specular paths
+  already covered by the image-source stage are omitted from this estimator.
 - Monte Carlo energy events are converted to pressure with repeatable randomized
   phase and a complementary seven-band filter bank.
 - Every arrival is encoded directly to third-order ACN/SN3D (AmbiX) using its
@@ -60,7 +62,7 @@ objects themselves are excluded from acoustic geometry.
 
 ## IR content modes
 
-- **Full IR** includes direct sound, deterministic first-order reflections,
+- **Full IR** includes direct sound, deterministic specular reflections,
   diffraction when needed and enabled, and the diffuse reflected field.
 - **Wet Reflections** omits direct sound but retains deterministic early
   reflections, optional diffraction, and the diffuse field.
@@ -81,7 +83,7 @@ The defaults are intended as a useful first listening render:
 | Sample rate | 48 kHz | Good general production rate |
 | Duration | 2.0 s | Increase for large or highly reflective spaces |
 | Content | Full IR | Change to Wet or Diffuse for send effects |
-| Early reflections | On | Resolves first-order specular paths cleanly |
+| Early reflections | On, order 2 | Resolves first- and second-order specular paths cleanly |
 | Air absorption | On | 20 C, 50% RH, 101.325 kPa |
 | Random seed | 1 | Repeatable comparison between scene edits |
 | Edge diffraction | Off | Enable only when shadowing needs it |
@@ -94,6 +96,19 @@ only changes transport quality; sample rate, duration, and IR content remain
 under explicit user control. If the tail sounds grainy, raise Listener Rays
 before raising Maximum Bounces. If energy stops too soon, increase IR Duration
 and Maximum Bounces together.
+
+**Specular Order** controls the deterministic image-source depth independently
+of stochastic render quality. Order 2 is the default balance. Order 3 improves
+discrete echoes and localization in corridors, coupled rooms, and other strongly
+specular spaces, but its candidate count grows rapidly with the number of
+distinct reflector planes. Coplanar triangles on one object are grouped before
+enumeration. If an order exceeds **Early Path Budget**, that order and higher
+ones are omitted rather than partially sampling a directionally biased subset;
+the render reports the highest completed order and records it in the JSON
+sidecar. Raising the budget is useful when the geometry is already acoustically
+simple and additional waiting time is acceptable. This hybrid division follows
+the perceptually motivated structure explored by [Johnson and Lee
+(2016)](https://eprints.hud.ac.uk/id/eprint/28645/).
 
 **Preserve Relative Level** is the default so Full IR exports retain distance
 and material level differences. Float WAV is recommended because close sources
@@ -138,8 +153,9 @@ receiver, render settings, normalization gain, and event counts.
 
 - Geometric acoustics does not reproduce low-frequency wave modes or modal
   pressure variation.
-- Explicit specular image sources currently cover first-order reflections;
-  higher orders are sampled stochastically.
+- Explicit specular image sources are limited to third order. Their cost grows
+  combinatorially with distinct reflector planes, so highly tessellated curved
+  geometry may reach the user-configurable early-path budget.
 - Diffraction is a bounded, single-edge approximation and is disabled by
   default.
 - Point source and point receiver directivity are currently omnidirectional.
@@ -163,5 +179,6 @@ the target Blender runtime:
 ```
 
 The test suite checks ACN/SN3D encoding, air attenuation, complementary-band
-synthesis, energy sampling, direct-path calibration, content separation,
-diffraction, evaluated Blender geometry, repeatability, and output levels.
+synthesis, energy sampling, multi-order finite image-source paths, direct-path
+calibration, content separation, diffraction, evaluated Blender geometry,
+repeatability, and output levels.

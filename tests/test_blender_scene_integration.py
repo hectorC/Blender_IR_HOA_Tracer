@@ -6,7 +6,8 @@ import os
 import sys
 import tempfile
 import unittest
-from math import pi
+from collections import Counter
+from math import pi, sqrt
 
 import bpy
 import numpy as np
@@ -49,6 +50,7 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
         scene.airt_air_enable = False
         scene.airt_enable_diffraction = False
         scene.airt_early_reflections = True
+        scene.airt_early_order = 2
 
     def _endpoint(self, name, location, source=False):
         obj = bpy.data.objects.new(name, None)
@@ -69,6 +71,23 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
         room.scale = (5.0, 4.0, 3.0)
         room.airt_material_preset = 'PLASTER'
         return room
+
+    def _specular_wall(self, name, x, absorption=0.0):
+        bpy.ops.mesh.primitive_plane_add(
+            size=100.0,
+            location=(x, 0.0, 0.0),
+            rotation=(0.0, pi / 2.0, 0.0),
+        )
+        wall = bpy.context.object
+        wall.name = name
+        wall.airt_material_preset = 'CUSTOM'
+        wall.absorption = absorption
+        wall.absorption_bands = (absorption,) * 7
+        wall.scatter = 0.0
+        wall.scatter_bands = (0.0,) * 7
+        wall.transmission = 0.0
+        wall.transmission_bands = (0.0,) * 7
+        return wall
 
     def _render(self, content):
         bpy.context.scene.airt_output_content = content
@@ -168,6 +187,8 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
             self.assertAlmostEqual(scene.airt_ir_seconds, 2.0)
             self.assertEqual(scene.airt_output_content, 'FULL')
             self.assertTrue(scene.airt_early_reflections)
+            self.assertEqual(scene.airt_early_order, 2)
+            self.assertEqual(scene.airt_early_path_budget, 1_000_000)
             self.assertTrue(scene.airt_air_enable)
             self.assertFalse(scene.airt_enable_diffraction)
             self.assertEqual(scene.airt_seed, 1)
@@ -183,6 +204,7 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
             original_sample_rate = scene.airt_sr
             original_duration = scene.airt_ir_seconds
             original_content = scene.airt_output_content
+            original_early_order = scene.airt_early_order
             scene.airt_quality_preset = 'ULTRA'
 
             self.assertEqual(scene.airt_num_rays, 16384)
@@ -193,6 +215,7 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
             self.assertEqual(scene.airt_sr, original_sample_rate)
             self.assertEqual(scene.airt_ir_seconds, original_duration)
             self.assertEqual(scene.airt_output_content, original_content)
+            self.assertEqual(scene.airt_early_order, original_early_order)
 
             scene.airt_num_rays = 20000
             self.assertEqual(scene.airt_quality_preset, 'CUSTOM')
@@ -231,6 +254,70 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
         self.assertEqual(len(side_events), 1)
         self.assertLess(side_events[0].arrival_direction.z, -0.99)
 
+    def test_parallel_walls_resolve_second_and_third_order_image_paths(self):
+        scene = bpy.context.scene
+        scene.airt_ir_seconds = 1.0
+        scene.airt_output_content = 'REFLECTIONS'
+        scene.airt_early_order = 3
+        self._endpoint("Source", (2.0, -1.0, 0.0), source=True)
+        self._endpoint("Receiver", (7.0, 1.0, 0.0))
+        self._specular_wall("Wall A", 0.0)
+        self._specular_wall("Wall B", 10.0)
+
+        engine = AmbisonicIREngine(bpy.context)
+        events = engine._deterministic_specular_events(
+            object_world_position(bpy.context, scene.airt_source_object),
+            object_world_position(bpy.context, scene.airt_receiver_object),
+        )
+
+        self.assertEqual(Counter(event.order for event in events), {1: 2, 2: 2, 3: 2})
+        expected_distances = {
+            1: sorted((sqrt(85.0), sqrt(125.0))),
+            2: sorted((sqrt(229.0), sqrt(629.0))),
+            3: sorted((sqrt(845.0), sqrt(965.0))),
+        }
+        for order, distances in expected_distances.items():
+            order_events = sorted(
+                (event for event in events if event.order == order),
+                key=lambda event: event.delay_seconds,
+            )
+            np.testing.assert_allclose(
+                [
+                    event.delay_seconds * engine.config.speed_of_sound_bu
+                    for event in order_events
+                ],
+                distances,
+                rtol=1e-6,
+                atol=1e-6,
+            )
+            np.testing.assert_allclose(
+                [sqrt(float(event.energy_bands[0])) for event in order_events],
+                [1.0 / distance for distance in distances],
+                rtol=1e-6,
+                atol=1e-6,
+            )
+        self.assertEqual(engine.tracer.stats.early_highest_order, 3)
+        self.assertEqual(engine.tracer.stats.early_sequences_tested, 6)
+        self.assertEqual(engine.tracer.stats.early_orders_skipped, 0)
+
+    def test_opaque_divider_blocks_multi_order_image_paths(self):
+        scene = bpy.context.scene
+        scene.airt_ir_seconds = 1.0
+        scene.airt_output_content = 'REFLECTIONS'
+        scene.airt_early_order = 3
+        self._endpoint("Source", (2.0, -1.0, 0.0), source=True)
+        self._endpoint("Receiver", (7.0, 1.0, 0.0))
+        self._specular_wall("Wall A", 0.0)
+        self._specular_wall("Wall B", 10.0)
+        self._specular_wall("Absorbing Divider", 5.0, absorption=1.0)
+
+        engine = AmbisonicIREngine(bpy.context)
+        events = engine._deterministic_specular_events(
+            object_world_position(bpy.context, scene.airt_source_object),
+            object_world_position(bpy.context, scene.airt_receiver_object),
+        )
+        self.assertEqual(events, [])
+
     def test_render_operator_writes_16_channel_wav_and_metadata(self):
         import soundfile
 
@@ -254,6 +341,15 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
                 metadata = json.load(metadata_file)
             self.assertEqual(metadata["channel_convention"], "ACN/SN3D (AmbiX)")
             self.assertEqual(len(metadata["channels"]), 16)
+            self.assertEqual(metadata["deterministic_reflection_order"], 2)
+            self.assertGreater(
+                metadata["deterministic_path_stats"]["surface_sequences_tested"],
+                0,
+            )
+            self.assertGreater(
+                metadata["deterministic_path_stats"]["events_by_order"]["2"],
+                0,
+            )
 
 
 if __name__ == "__main__":
