@@ -5,8 +5,6 @@ import os
 import sys
 import unittest
 from math import pi
-from types import SimpleNamespace
-
 import numpy as np
 from mathutils import Vector
 
@@ -23,26 +21,6 @@ from ir_raytracer.core.diffraction import (  # noqa: E402
     find_diffraction_paths,
     maekawa_diffraction_gains,
 )
-from ir_raytracer.core.ray_tracer import ForwardRayTracer  # noqa: E402
-
-
-class DiffractionProbe(ForwardRayTracer):
-    def __init__(self, config):
-        super().__init__(config)
-        self.emissions = []
-
-    def emit_impulse(
-        self, band_amplitude, distance_bu, incoming_direction, amplitude_scalar
-    ):
-        self.emissions.append((
-            band_amplitude.copy(),
-            float(distance_bu),
-            incoming_direction.copy(),
-            float(amplitude_scalar),
-        ))
-        return True
-
-
 class DiffractionTests(unittest.TestCase):
     origin = Vector((-1.0, 0.0, 0.0))
     receiver = Vector((1.0, 0.0, 0.0))
@@ -102,35 +80,6 @@ class DiffractionTests(unittest.TestCase):
             np.full(NUM_BANDS, minimum_gain),
             rtol=1e-6,
         )
-
-    def test_primary_diffraction_emits_one_frequency_shaped_path(self):
-        config = SimpleNamespace(
-            ir_length_samples=2048,
-            enable_diffraction=True,
-            diffraction_samples=1,
-            diffraction_max_angle=pi / 4.0,
-            diffraction_edge_index=DiffractionEdgeIndex([self.edge]),
-            unit_scale=1.0,
-            speed_of_sound=343.0,
-            receiver_radius_m=0.1,
-            eps=1e-4,
-        )
-        tracer = DiffractionProbe(config)
-
-        wrote = tracer._emit_primary_diffraction(
-            self.origin,
-            self.receiver,
-            bvh=None,
-            throughput=np.ones(NUM_BANDS, dtype=np.float32),
-        )
-
-        self.assertTrue(wrote)
-        self.assertEqual(len(tracer.emissions), 1)
-        bands, distance, _incoming, spreading = tracer.emissions[0]
-        self.assertGreater(float(bands[0]), float(bands[-1]))
-        self.assertGreater(distance, 2.0)
-        self.assertAlmostEqual(spreading, 1.0 / distance, places=6)
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

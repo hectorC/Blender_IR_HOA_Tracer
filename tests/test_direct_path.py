@@ -1,10 +1,4 @@
-"""Regression tests for Full IR and Reverb Only direct-path handling.
-
-Run with Blender's Python environment, for example:
-
-    blender --background --factory-startup --python-exit-code 1 \
-        --python tests/test_direct_path.py
-"""
+"""Direct-path and output-content tests for the unified engine."""
 from __future__ import annotations
 
 import os
@@ -21,105 +15,80 @@ if PROJECT_ROOT not in sys.path:
 
 from ir_raytracer.core.ambisonic import AmbisonicEncoder  # noqa: E402
 from ir_raytracer.core.ray_tracer import (  # noqa: E402
-    ForwardRayTracer,
-    ReverseRayTracer,
+    AcousticRenderConfig,
+    AmbisonicIREngine,
 )
+from ir_raytracer.utils.scene_utils import AcousticScene  # noqa: E402
 
 
-class EmptyBVH:
-    """A scene with unobstructed line of sight and no reflecting geometry."""
-
-    def ray_cast(self, _origin, _direction):
-        return None, None, None, None
-
-
-class DirectPathConfig:
-    """Minimal deterministic config accepted by both tracer implementations."""
-
-    def __init__(
-        self,
-        include_direct: bool,
-        segment_capture: bool = True,
-        enable_diffraction: bool = False,
-    ):
-        self.num_rays = 1
-        self.max_bounces = 0
-        self.sample_rate = 48000
-        self.ir_length_samples = 1000
-        self.speed_of_sound = 343.0
-        self.unit_scale = 1.0
-        self.receiver_radius_m = 0.25
-        self.receiver_radius = 0.25
-        self.angle_tolerance_rad = np.deg2rad(8.0)
-        self.specular_roughness_rad = 0.0
-        self.segment_capture = segment_capture
-        self.rr_enable = False
-        self.rr_start_bounce = 40
-        self.rr_survive_prob = 0.99
-        self.enable_diffraction = enable_diffraction
-        self.diffraction_samples = 0
-        self.diffraction_max_angle = 0.0
-        self.diffraction_edge_index = None
-        self.include_primary_diffraction = True
-        self.air_enable = False
-        self.air_temp_c = 20.0
-        self.air_humidity = 50.0
-        self.air_pressure_kpa = 101.325
-        self.quick_broadband = True
-        self.min_throughput = 1e-6
-        self.include_direct = include_direct
-        self.ambisonic_encoder = AmbisonicEncoder()
-        self.eps = 1e-4
+def _config(content: str) -> AcousticRenderConfig:
+    return AcousticRenderConfig(
+        ray_count=1,
+        max_bounces=0,
+        sample_rate=48000,
+        duration_seconds=0.1,
+        output_content=content,
+        early_reflections=True,
+        seed=1,
+        min_energy=1e-8,
+        rr_enabled=False,
+        rr_start=20,
+        rr_survival=0.97,
+        specular_roughness_rad=0.1,
+        unit_scale=1.0,
+        speed_of_sound_bu=343.0,
+        air_enabled=False,
+        air_temperature_c=20.0,
+        air_humidity_pct=50.0,
+        air_pressure_kpa=101.325,
+        diffraction_enabled=False,
+        diffraction_paths=1,
+        diffraction_max_angle_rad=0.8,
+        early_gain_db=0.0,
+        diffuse_gain_db=0.0,
+        encoder=AmbisonicEncoder(),
+    )
 
 
 class DirectPathTests(unittest.TestCase):
-    source = Vector((0.0, 0.0, 0.0))
-    receiver = Vector((0.0, -1.0, 0.0))
-    direct_direction = [(0.0, -1.0, 0.0)]
+    source = Vector((0.0, -1.0, 0.0))
+    receiver = Vector((0.0, 0.0, 0.0))
 
-    def _trace(self, tracer_type, include_direct: bool) -> np.ndarray:
-        tracer = tracer_type(DirectPathConfig(include_direct))
-        return tracer.trace_rays(
-            self.source,
-            self.receiver,
-            EmptyBVH(),
-            [],
-            self.direct_direction,
+    def _render(self, content):
+        engine = AmbisonicIREngine(
+            None,
+            _config(content),
+            AcousticScene(bvh=None, faces=[]),
         )
+        return engine.render(self.source, self.receiver)
 
-    def test_forward_full_ir_contains_direct_arrival_exactly_once(self):
-        ir = self._trace(ForwardRayTracer, include_direct=True)
+    def test_full_ir_contains_one_unit_direct_arrival_at_one_metre(self):
+        result = self._render('FULL')
+        self.assertEqual(result.synthesis.direct_events, 1)
+        self.assertEqual(result.synthesis.early_events, 0)
+        self.assertEqual(result.synthesis.diffuse_events, 0)
+        self.assertAlmostEqual(float(np.sum(result.ir[0])), 1.0, places=5)
+        expected_sample = int(round(48000.0 / 343.0))
+        self.assertLessEqual(abs(int(np.argmax(np.abs(result.ir[0]))) - expected_sample), 1)
 
-        # At one metre, broadband W amplitude is 1/r = 1. Segment capture is
-        # deliberately enabled: bounce zero must still not duplicate it.
-        self.assertAlmostEqual(float(np.sum(ir[0])), 1.0, places=6)
-        self.assertGreater(np.count_nonzero(ir[0]), 0)
+    def test_reflections_and_diffuse_modes_exclude_direct_sound(self):
+        for content in ('REFLECTIONS', 'DIFFUSE'):
+            with self.subTest(content=content):
+                result = self._render(content)
+                self.assertEqual(result.synthesis.direct_events, 0)
+                np.testing.assert_array_equal(result.ir, np.zeros_like(result.ir))
 
-    def test_forward_reverb_only_suppresses_zero_bounce_capture(self):
-        ir = self._trace(ForwardRayTracer, include_direct=False)
-        np.testing.assert_array_equal(ir, np.zeros_like(ir))
-
-    def test_reverb_only_does_not_restore_visible_direct_when_diffraction_is_enabled(self):
-        tracer = ForwardRayTracer(DirectPathConfig(
-            include_direct=False,
-            enable_diffraction=True,
-        ))
-        ir = tracer.trace_rays(
-            self.source,
-            self.receiver,
-            EmptyBVH(),
-            [],
-            self.direct_direction,
+    def test_direct_pressure_obeys_inverse_distance(self):
+        engine = AmbisonicIREngine(None, _config('FULL'), AcousticScene(None, []))
+        one_metre = engine.render(Vector((0.0, -1.0, 0.0)), self.receiver).ir
+        engine = AmbisonicIREngine(None, _config('FULL'), AcousticScene(None, []))
+        two_metres = engine.render(Vector((0.0, -2.0, 0.0)), self.receiver).ir
+        self.assertAlmostEqual(
+            float(np.sum(two_metres[0]))
+            / float(np.sum(one_metre[0])),
+            0.5,
+            places=5,
         )
-        np.testing.assert_array_equal(ir, np.zeros_like(ir))
-
-    def test_reverse_full_ir_contains_direct_arrival_exactly_once(self):
-        ir = self._trace(ReverseRayTracer, include_direct=True)
-        self.assertAlmostEqual(float(np.sum(ir[0])), 1.0, places=6)
-
-    def test_reverse_reverb_only_has_no_direct_arrival(self):
-        ir = self._trace(ReverseRayTracer, include_direct=False)
-        np.testing.assert_array_equal(ir, np.zeros_like(ir))
 
 
 if __name__ == "__main__":

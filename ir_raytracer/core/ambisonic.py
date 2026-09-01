@@ -7,10 +7,6 @@ import numpy as np
 from math import pi, sqrt, sin, cos
 
 
-# ACN order mapping for 3rd order (16 channels)
-ACN_ORDERS = (0, 1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3)
-
-
 def apply_orientation_transform(direction: mathutils.Vector, yaw_offset_deg: float = 0.0, 
                                invert_z: bool = False) -> mathutils.Vector:
     """Apply orientation transforms to map Blender coordinates to AmbiX.
@@ -106,42 +102,6 @@ def encode_ambisonics_3rd_order(direction: mathutils.Vector) -> np.ndarray:
     ), dtype=np.float32)
 
 
-def apply_near_field_compensation(ambi_vec: np.ndarray, distance_m: float, 
-                                 reference_m: float = 1.0) -> np.ndarray:
-    """Apply near-field compensation to ambisonic coefficients.
-    
-    Boosts higher orders for close distances to maintain spatial impression.
-    
-    Args:
-        ambi_vec: Ambisonic coefficient vector
-        distance_m: Distance to source in meters
-        reference_m: Reference distance in meters
-        
-    Returns:
-        Compensated ambisonic coefficients
-    """
-    if reference_m <= 0.0:
-        return ambi_vec
-    
-    ref = max(reference_m, 1e-3)
-    dist = max(float(distance_m), 1e-3)
-    
-    if dist >= ref:
-        return ambi_vec
-    
-    scale = ref / dist
-    gains = np.ones_like(ambi_vec, dtype=np.float32)
-    
-    # Apply frequency-dependent boost to higher orders
-    for idx, order in enumerate(ACN_ORDERS):
-        if order <= 0:
-            continue
-        # Limit boost to prevent instability
-        gains[idx] = min(scale ** (0.5 * order), 8.0)
-    
-    return ambi_vec * gains
-
-
 def get_ambi_channel_names() -> list:
     """Get standard ACN channel names for 3rd order ambisonics."""
     names = []
@@ -199,9 +159,3 @@ class AmbisonicEncoder:
             direction, self.yaw_offset_deg, self.invert_z
         )
         return encode_ambisonics_3rd_order(oriented_dir)
-    
-    def encode_with_nf_compensation(self, direction: mathutils.Vector, 
-                                   distance_m: float, reference_m: float = 1.0) -> np.ndarray:
-        """Encode with near-field compensation."""
-        ambi_vec = self.encode(direction)
-        return apply_near_field_compensation(ambi_vec, distance_m, reference_m)

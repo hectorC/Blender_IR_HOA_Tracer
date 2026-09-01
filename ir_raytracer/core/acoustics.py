@@ -31,6 +31,12 @@ MATERIAL_PRESET_DATA = [
         (0.10, 0.12, 0.14, 0.16, 0.18, 0.18, 0.18)
     ),
     (
+        'PLASTER',
+        'Plaster',
+        (0.14, 0.10, 0.06, 0.05, 0.04, 0.05, 0.05),
+        (0.10, 0.12, 0.14, 0.16, 0.18, 0.20, 0.22)
+    ),
+    (
         'CARPET',
         'Carpet',
         (0.08, 0.12, 0.30, 0.55, 0.65, 0.70, 0.70),
@@ -105,6 +111,16 @@ def get_scatter_spectrum(obj: Any) -> np.ndarray:
 def get_transmission_coeff(obj: Any) -> float:
     """Get transmission coefficient for an object."""
     return float(np.clip(getattr(obj, 'transmission', 0.0) if obj else 0.0, 0.0, 1.0))
+
+
+def get_transmission_spectrum(obj: Any) -> np.ndarray:
+    """Get per-band transmitted-energy fractions for an object."""
+    scalar = get_transmission_coeff(obj)
+    if obj is not None and hasattr(obj, 'transmission_bands'):
+        values = getattr(obj, 'transmission_bands')
+        if values is not None and len(values) == NUM_BANDS:
+            return np.clip(np.array(values, dtype=np.float32), 0.0, 1.0)
+    return np.full(NUM_BANDS, scalar, dtype=np.float32)
 
 
 def iso9613_alpha_dbpm(f_hz: float, T_c: float, rh_pct: float, p_kpa: float) -> float:
@@ -246,6 +262,53 @@ def _default_kernel_length(sr: int) -> int:
     return max(128, min(2048, int(round(max(1000, int(sr)) * 0.0106667))))
 
 
+@lru_cache(maxsize=16)
+def design_complementary_filter_bank(
+    sr: int, kernel_len: Optional[int] = None
+) -> Tuple[np.ndarray, int]:
+    """Return a common-delay, complementary seven-band FIR bank.
+
+    Adjacent bands crossfade linearly on a log-frequency axis. Because every
+    frequency-bin weight sums to one and each band receives the same window,
+    summing all seven impulse responses reconstructs a delayed unit impulse.
+    """
+    sr = max(1000, int(sr))
+    if kernel_len is None:
+        kernel_len = _default_kernel_length(sr) | 1
+    kernel_len = max(33, int(kernel_len) | 1)
+    half = kernel_len // 2
+    n_fft = max(4096, 1 << int(np.ceil(np.log2(kernel_len * 8))))
+    frequencies = np.fft.rfftfreq(n_fft, d=1.0 / sr)
+    weights = np.zeros((NUM_BANDS, frequencies.size), dtype=np.float64)
+    centers = np.array(BAND_CENTERS_HZ, dtype=np.float64)
+
+    weights[0, frequencies <= centers[0]] = 1.0
+    weights[-1, frequencies >= centers[-1]] = 1.0
+    for band in range(NUM_BANDS - 1):
+        mask = (frequencies > centers[band]) & (frequencies < centers[band + 1])
+        if not np.any(mask):
+            continue
+        fraction = (
+            np.log2(frequencies[mask] / centers[band])
+            / np.log2(centers[band + 1] / centers[band])
+        )
+        weights[band, mask] = 1.0 - fraction
+        weights[band + 1, mask] = fraction
+    for band, center in enumerate(centers):
+        nearest = int(np.argmin(np.abs(frequencies - center)))
+        weights[band, nearest] = 1.0
+        if band > 0:
+            weights[band - 1, nearest] = 0.0
+
+    window = np.hanning(kernel_len)
+    kernels = np.empty((NUM_BANDS, kernel_len), dtype=np.float64)
+    for band in range(NUM_BANDS):
+        zero_phase = np.fft.irfft(weights[band], n=n_fft)
+        centered = np.concatenate((zero_phase[-half:], zero_phase[:half + 1]))
+        kernels[band] = centered * window
+    return kernels.astype(np.float32), half
+
+
 def design_band_kernel(
     band_profile: np.ndarray, sr: int, kernel_len: Optional[int] = None
 ) -> np.ndarray:
@@ -297,16 +360,12 @@ class MaterialProperties:
         if obj is None:
             self.absorption_spectrum = np.array(DEFAULT_ABSORPTION_SPECTRUM, dtype=np.float32)
             self.scatter_spectrum = np.array(DEFAULT_SCATTER_SPECTRUM, dtype=np.float32)
-            self.transmission = 0.0
         else:
             self.absorption_spectrum = get_absorption_spectrum(obj)
             self.scatter_spectrum = get_scatter_spectrum(obj)
-            self.transmission = get_transmission_coeff(obj)
         
         # Calculate derived properties
-        self.transmission_spectrum = np.clip(
-            np.full(NUM_BANDS, self.transmission, dtype=np.float32), 0.0, 1.0
-        )
+        self.transmission_spectrum = get_transmission_spectrum(obj)
         self.reflection_spectrum = np.clip(
             1.0 - self.absorption_spectrum - self.transmission_spectrum, 0.0, 1.0
         )
@@ -314,9 +373,3 @@ class MaterialProperties:
         # Scattering fractions
         self.specular_fraction = np.clip(1.0 - self.scatter_spectrum, 0.0, 1.0)
         self.diffuse_fraction = np.clip(self.scatter_spectrum, 0.0, 1.0)
-        
-        # Amplitude coefficients (square root for energy conservation)
-        self.reflection_amplitude = np.sqrt(np.maximum(self.reflection_spectrum, 1e-6))
-        self.transmission_amplitude = np.sqrt(self.transmission_spectrum)
-        self.specular_amplitude = self.reflection_amplitude * np.sqrt(np.maximum(self.specular_fraction, 1e-6))
-        self.diffuse_amplitude = self.reflection_amplitude * np.sqrt(np.maximum(self.diffuse_fraction, 1e-6))

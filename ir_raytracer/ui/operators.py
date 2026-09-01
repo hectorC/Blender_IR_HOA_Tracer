@@ -1,883 +1,315 @@
-# -*- coding: utf-8 -*-
-"""
-Operators for the Ambisonic IR Tracer.
-"""
-import bpy
-import copy
+"""Blender operators for rendering and configuring ambisonic IRs."""
+from __future__ import annotations
+
+import json
+import os
 import sys
-import random
+
+import bpy
 import numpy as np
-import importlib
+
+from ..core.acoustics import BAND_CENTERS_HZ, NUM_BANDS
+from ..core.ambisonic import get_ambi_channel_names
+from ..core.ray_tracer import AcousticRenderConfig, AmbisonicIREngine
+from ..utils.scene_utils import (
+    build_acoustic_scene,
+    get_scene_receiver_objects,
+    get_scene_source_objects,
+    get_writable_path,
+    object_world_position,
+)
+
 
 def check_soundfile_availability():
-    """Check if soundfile is available and attempt to import it."""
     try:
-        # Force reload of soundfile module to avoid cache issues
-        if 'soundfile' in sys.modules:
-            importlib.reload(sys.modules['soundfile'])
-        
-        import soundfile as sf
-        return True, sf
-    except ImportError as e:
-        return False, str(e)
+        import soundfile as soundfile
+        return True, soundfile
+    except ImportError as error:
+        return False, str(error)
 
-# Check for required dependencies with better error handling
-HAVE_SF, SF_ERROR = check_soundfile_availability()
-if HAVE_SF:
-    import soundfile as sf
-else:
-    sf = None
 
-# Check for required dependencies with better error handling
-HAVE_SF, SF_ERROR = check_soundfile_availability()
-if HAVE_SF:
-    import soundfile as sf
-else:
-    sf = None
+def prepare_ir_for_export(
+    ir: np.ndarray, normalization: str, peak_db: float
+) -> tuple[np.ndarray, float]:
+    """Return an export copy and the applied linear gain."""
+    output = np.asarray(ir, dtype=np.float32).copy()
+    if normalization != 'PEAK':
+        return output, 1.0
+    current_peak = float(np.max(np.abs(output))) if output.size else 0.0
+    if current_peak <= 1e-12:
+        return output, 1.0
+    target_peak = 10.0 ** (float(peak_db) / 20.0)
+    gain = target_peak / current_peak
+    output *= gain
+    return output, gain
 
-try:
-    from ..core.ray_tracer import RayTracingConfig, trace_impulse_response
-    HAVE_TRACER = True
-except ImportError:
-    RayTracingConfig = None
-    HAVE_TRACER = False
 
-# Cache management utilities
-import base64
-import hashlib
-import json
-
-def _serialize_ir_data(ir: np.ndarray) -> str:
-    """Serialize IR numpy array to base64 string for storage in Blender properties."""
-    ir_bytes = ir.tobytes()
-    return base64.b64encode(ir_bytes).decode('utf-8')
-
-def _deserialize_ir_data(data_str: str, shape: tuple, dtype=np.float32) -> np.ndarray:
-    """Deserialize base64 string back to numpy array."""
-    ir_bytes = base64.b64decode(data_str.encode('utf-8'))
-    ir = np.frombuffer(ir_bytes, dtype=dtype).reshape(shape)
-    return ir.copy()  # Ensure writable array
-
-def _compute_scene_hash(context) -> str:
-    """Compute hash of scene parameters that affect IR tracing."""
+def _selected_source(context):
     scene = context.scene
-    
-    # Parameters that invalidate cache when changed
-    hash_params = {
-        'num_rays': scene.airt_num_rays,
-        'passes': scene.airt_passes, 
-        'max_order': scene.airt_max_order,
-        'sr': scene.airt_sr,
-        'ir_seconds': scene.airt_ir_seconds,
-        'recv_radius': scene.airt_recv_radius,
-        'seed': scene.airt_seed,
-        'spec_rough_deg': scene.airt_spec_rough_deg,
-        'enable_seg_capture': scene.airt_enable_seg_capture,
-        'enable_diffraction': scene.airt_enable_diffraction,
-        'diffraction_samples': scene.airt_diffraction_samples,
-        'diffraction_max_deg': scene.airt_diffraction_max_deg,
-        'rr_enable': scene.airt_rr_enable,
-        'rr_start': scene.airt_rr_start,
-        'rr_p': scene.airt_rr_p,
-        'air_enable': scene.airt_air_enable,
-        'air_temp_c': scene.airt_air_temp_c,
-        'air_humidity': scene.airt_air_humidity,
-        'air_pressure_kpa': scene.airt_air_pressure_kpa,
-        'quick_broadband': scene.airt_quick_broadband,
-        'min_throughput': scene.airt_min_throughput,
-        'yaw_offset_deg': scene.airt_yaw_offset_deg,
-        'invert_z': scene.airt_invert_z,
-        'output_content': scene.airt_output_content,
-        'calibrate_direct': scene.airt_calibrate_direct
-    }
-    
-    # Add geometry and material information (simplified)
-    # TODO: Could add more detailed scene geometry/material hashing
-    hash_params['object_count'] = len([obj for obj in context.scene.objects if obj.type == 'MESH'])
-    
-    # Serialize and hash
-    hash_str = json.dumps(hash_params, sort_keys=True)
-    return hashlib.md5(hash_str.encode()).hexdigest()
+    selected = getattr(scene, 'airt_source_object', None)
+    if selected is not None:
+        return selected
+    tagged = get_scene_source_objects(context)
+    return tagged[0] if tagged else None
 
-def _is_cache_valid(context) -> bool:
-    """Check if the cached IRs are valid for the current scene."""
+
+def _selected_receiver(context):
     scene = context.scene
-    
-    if not scene.airt_hybrid_cache_valid:
-        return False
-        
-    if not scene.airt_hybrid_cache_forward_ir or not scene.airt_hybrid_cache_reverse_ir:
-        return False
-        
-    current_hash = _compute_scene_hash(context)
-    if current_hash != scene.airt_hybrid_cache_scene_hash:
-        return False
-        
-    return True
-
-def _store_irs_in_cache(context, forward_ir: np.ndarray, reverse_ir: np.ndarray, sample_rate: int):
-    """Store processed forward and reverse IRs in cache."""
-    scene = context.scene
-    
-    # Serialize IR data
-    scene.airt_hybrid_cache_forward_ir = _serialize_ir_data(forward_ir)
-    scene.airt_hybrid_cache_reverse_ir = _serialize_ir_data(reverse_ir)
-    
-    # Store metadata
-    scene.airt_hybrid_cache_sample_rate = sample_rate
-    scene.airt_hybrid_cache_ir_length = forward_ir.shape[1]
-    scene.airt_hybrid_cache_channels = forward_ir.shape[0]
-    scene.airt_hybrid_cache_scene_hash = _compute_scene_hash(context)
-    scene.airt_hybrid_cache_valid = True
-    
-    print(f"Cached hybrid IRs: {forward_ir.shape[0]} channels, {forward_ir.shape[1]} samples at {sample_rate}Hz")
-
-def _load_irs_from_cache(context) -> tuple:
-    """Load forward and reverse IRs from cache. Returns (forward_ir, reverse_ir, sample_rate)."""
-    scene = context.scene
-    
-    if not _is_cache_valid(context):
-        return None, None, 0
-    
-    # Reconstruct IR arrays
-    shape = (scene.airt_hybrid_cache_channels, scene.airt_hybrid_cache_ir_length)
-    forward_ir = _deserialize_ir_data(scene.airt_hybrid_cache_forward_ir, shape)
-    reverse_ir = _deserialize_ir_data(scene.airt_hybrid_cache_reverse_ir, shape)
-    
-    return forward_ir, reverse_ir, scene.airt_hybrid_cache_sample_rate
-
-def _invalidate_cache(context):
-    """Invalidate the hybrid IR cache."""
-    scene = context.scene
-    scene.airt_hybrid_cache_valid = False
-    scene.airt_hybrid_cache_forward_ir = ""
-    scene.airt_hybrid_cache_reverse_ir = ""
-    scene.airt_hybrid_cache_scene_hash = ""
-    print("Hybrid IR cache invalidated")
-
-
-try:
-    from ..core.ray_tracer import RayTracingConfig, trace_impulse_response
-    from ..utils.scene_utils import build_bvh, get_scene_sources, get_scene_receivers, get_writable_path
-except ImportError:
-    # Fallback for development/testing
-    trace_impulse_response = None
-    RayTracingConfig = None
-    build_bvh = get_scene_sources = get_scene_receivers = get_writable_path = None
-
-
-def calibrate_direct_1_over_r(ir: np.ndarray, context, source, receiver, bvh=None):
-    """Scale the IR so the measured direct W amplitude matches 1/distance."""
-    try:
-        from ..utils.scene_utils import (
-            get_scene_unit_scale,
-            los_clear,
-            speed_of_sound_bu,
-        )
-        
-        sr = int(context.scene.airt_sr)
-        c = speed_of_sound_bu(context)
-        dist_bu = (receiver - source).length
-        dist_m = dist_bu * get_scene_unit_scale(context)
-        
-        if dist_bu <= 1e-9 or dist_m <= 1e-9 or ir.shape[1] <= 22:
-            return ir, "Calibrate: skipped (zero distance or IR too short)", False
-
-        if bvh is not None and not los_clear(source, receiver, bvh):
-            return ir, "Calibrate: skipped (direct line of sight is blocked)", False
-        
-        delay = (dist_bu / c) * sr
-        n = int(round(delay))
-        n0 = max(0, n - 10)
-        n1 = min(ir.shape[1], n + 11)
-        
-        a_meas = float(np.max(np.abs(ir[0, n0:n1])))
-        if a_meas <= 1e-9:
-            # A blocked direct path has no physically defined direct reference.
-            # Scaling from an arbitrary early reflection would change the room
-            # balance unpredictably, so leave the render untouched.
-            return ir, f"Calibrate: skipped (no direct arrival near sample {n})", False
-        
-        a_exp = 1.0 / dist_m
-        k = a_exp / a_meas
-        ir *= k
-        
-        return ir, f"Calibrate: dist={dist_m:.3f}m, expW={a_exp:.6f}, measW={a_meas:.6f}, k={k:.4f}, n~{n}, window=+/-10", True
-    
-    except Exception as e:
-        return ir, f"Calibrate: skipped (err: {e})", False
+    selected = getattr(scene, 'airt_receiver_object', None)
+    if selected is not None:
+        return selected
+    tagged = get_scene_receiver_objects(context)
+    return tagged[0] if tagged else None
 
 
 class AIRT_OT_RenderIR(bpy.types.Operator):
-    """Render ambisonic impulse response operator."""
+    """Render a third-order ACN/SN3D impulse response."""
+
     bl_idname = "airt.render_ir"
     bl_label = "Render Ambisonic IR"
-    bl_description = "Render ambisonic impulse response using ray tracing"
+    bl_description = "Render direct, early, and diffuse acoustic energy into a 16-channel HOA WAV"
+    bl_options = {'REGISTER'}
 
     def execute(self, context):
-        """Execute the render operation."""
-        # Check dependencies with runtime re-check
-        sf_available, sf_error = check_soundfile_availability()
-        if not sf_available:
-            cmd = f"{sys.executable} -m pip install soundfile"
-            error_msg = f"python-soundfile is required but not available.\nError: {sf_error}\nInstall with: {cmd}"
-            self.report({'ERROR'}, error_msg)
+        available, soundfile_or_error = check_soundfile_availability()
+        if not available:
+            command = f"{sys.executable} -m pip install soundfile"
+            self.report({'ERROR'}, f"python-soundfile is required: {soundfile_or_error}. Install with {command}")
             return {'CANCELLED'}
-        
-        # Import soundfile after confirming it's available
-        import soundfile as sf
-        
-        # Validate scene setup
+        soundfile = soundfile_or_error
+
+        source_object = _selected_source(context)
+        receiver_object = _selected_receiver(context)
+        if source_object is None or receiver_object is None:
+            self.report({'ERROR'}, "Choose one Source and one Receiver")
+            return {'CANCELLED'}
+        if source_object == receiver_object:
+            self.report({'ERROR'}, "Source and Receiver must be different objects")
+            return {'CANCELLED'}
+
+        source = object_world_position(context, source_object)
+        receiver = object_world_position(context, receiver_object)
+        acoustic_scene = build_acoustic_scene(context)
+        if acoustic_scene.bvh is None:
+            self.report({'WARNING'}, "No acoustic geometry found; rendering direct sound only")
+
+        config = AcousticRenderConfig.from_context(context)
+        window_manager = context.window_manager
+        window_manager.progress_begin(0, config.ray_count)
+
+        def update_progress(done, total):
+            window_manager.progress_update(min(done, total))
+
+        try:
+            engine = AmbisonicIREngine(context, config, acoustic_scene)
+            result = engine.render(source, receiver, update_progress)
+        except Exception as error:
+            self.report({'ERROR'}, f"Acoustic render failed: {error}")
+            return {'CANCELLED'}
+        finally:
+            window_manager.progress_end()
+
         scene = context.scene
-        sources = get_scene_sources(context)
-        receivers = get_scene_receivers(context)
-        
-        if not sources or not receivers:
-            self.report({'WARNING'}, "Need at least one source and one receiver object")
-            return {'CANCELLED'}
-        
-        # Use first source and receiver
-        source = sources[0]
-        receiver = receivers[0]
-        
-        # Build BVH for scene geometry
-        self.report({'INFO'}, "Building BVH tree...")
-        bvh, obj_map = build_bvh(context)
-        
-        if bvh is None:
-            self.report({'WARNING'}, "No geometry found for ray tracing")
-            return {'CANCELLED'}
-        
-        # Perform multiple passes with averaging
-        passes = max(1, int(scene.airt_passes))
-        ir = None
-        # Reuse the immutable render configuration and diffraction edge index
-        # across averaging passes.
-        render_config = RayTracingConfig(context)
-        
-        self.report({'INFO'}, f"Starting {passes} render pass(es)...")
-        
-        # Accumulate results with better energy handling
-        for pass_idx in range(passes):
-            # Set random seed for reproducible results
-            if scene.airt_seed:
-                seed = int(scene.airt_seed) + pass_idx
-                random.seed(seed)
-                np.random.seed(seed)
-            
-            # Trace impulse response for this pass
-            self.report({'INFO'}, f"Tracing pass {pass_idx + 1}/{passes}...")
-            
-            # NEW HYBRID WORKFLOW: Handle hybrid differently
-            if scene.airt_trace_mode == 'HYBRID':
-                ir_pass = self._trace_new_hybrid(
-                    context, source, receiver, bvh, obj_map, render_config
-                )
-            else:
-                # Standard single-method tracing
-                ir_pass = trace_impulse_response(
-                    context,
-                    source,
-                    receiver,
-                    bvh,
-                    obj_map,
-                    config=render_config,
-                )
-            
-            
-            # Accumulate results with float64 precision to avoid rounding errors
-            if ir is None:
-                ir = ir_pass.astype(np.float64)  # Use higher precision during accumulation
-            else:
-                ir += ir_pass.astype(np.float64)
-        
-        # Average across passes and convert back to float32
-        ir = (ir / float(passes)).astype(np.float32)
-        
-        output_content = getattr(scene, 'airt_output_content', 'FULL')
-        should_calibrate = (
-            output_content == 'FULL'
-            and bool(getattr(scene, 'airt_calibrate_direct', False))
+        export_ir, applied_gain = prepare_ir_for_export(
+            result.ir,
+            scene.airt_normalization,
+            scene.airt_peak_db,
         )
-        calibration_applied = False
-        
-        if should_calibrate:
-            ir, cal_info, calibration_applied = calibrate_direct_1_over_r(
-                ir, context, source, receiver, bvh
+        output_path = get_writable_path(scene.airt_output_path)
+        try:
+            soundfile.write(
+                output_path,
+                export_ir.T,
+                int(scene.airt_sr),
+                subtype=scene.airt_wav_subtype,
             )
-            self.report({'INFO'}, cal_info)
-        
-        
-        # Write output file
-        try:
-            sr = scene.airt_sr
-            subtype = scene.airt_wav_subtype
-            wav_path = get_writable_path("ir_output.wav")
-            
-            ir_max_abs = float(np.max(np.abs(ir)))
-            if calibration_applied:
-                # Peak normalization would cancel the absolute 1/r calibration.
-                ir_export = ir
-                self.report({'INFO'}, f"Preserving calibrated IR level (peak {ir_max_abs:.3f})")
-                if subtype != 'FLOAT' and ir_max_abs > 1.0:
-                    self.report({'WARNING'}, "Calibrated peak exceeds 0 dBFS; use 32-bit Float to avoid PCM clipping")
-            elif ir_max_abs > 1e-12:
-                target_peak = 1.0
-                normalization_factor = target_peak / ir_max_abs
-                ir_export = ir * normalization_factor
-                
-                gain_db = 20 * np.log10(normalization_factor)
-                self.report({'INFO'}, f"IR normalized to 0 dBFS: peak {ir_max_abs:.3f} -> {target_peak:.3f} ({gain_db:+.1f} dB gain)")
-            else:
-                ir_export = ir
-                self.report({'WARNING'}, "IR contains no signal - no normalization applied")
-            
-            # Transpose for soundfile (expects channels x samples -> samples x channels)
-            sf.write(wav_path, ir_export.T.astype(np.float32), samplerate=sr, subtype=subtype)
-            
-            self.report({'INFO'}, f"IR saved to {wav_path} ({subtype}, {ir.shape[0]} channels, {ir.shape[1]} samples)")
-            
-        except Exception as e:
-            self.report({'ERROR'}, f"Failed to write WAV file: {e}")
+            metadata = {
+                "format": "third-order ambisonic impulse response",
+                "channel_convention": "ACN/SN3D (AmbiX)",
+                "channels": get_ambi_channel_names(),
+                "sample_rate": int(scene.airt_sr),
+                "duration_seconds": float(scene.airt_ir_seconds),
+                "source": source_object.name,
+                "receiver": receiver_object.name,
+                "source_position_bu": list(source),
+                "receiver_position_bu": list(receiver),
+                "content": scene.airt_output_content,
+                "quality": scene.airt_quality_preset,
+                "listener_rays": config.ray_count,
+                "maximum_bounces": config.max_bounces,
+                "seed": config.seed,
+                "scene_unit_scale_metres": config.unit_scale,
+                "speed_of_sound_bu_per_second": config.speed_of_sound_bu,
+                "deterministic_early_reflections": config.early_reflections,
+                "early_gain_db": config.early_gain_db,
+                "diffuse_gain_db": config.diffuse_gain_db,
+                "air": {
+                    "enabled": config.air_enabled,
+                    "temperature_c": config.air_temperature_c,
+                    "relative_humidity_percent": config.air_humidity_pct,
+                    "pressure_kpa": config.air_pressure_kpa,
+                },
+                "diffraction": {
+                    "enabled": config.diffraction_enabled,
+                    "maximum_paths": config.diffraction_paths,
+                },
+                "orientation": {
+                    "yaw_degrees": config.encoder.yaw_offset_deg,
+                    "invert_z": config.encoder.invert_z,
+                },
+                "frequency_bands_hz": list(BAND_CENTERS_HZ),
+                "normalization": scene.airt_normalization,
+                "applied_gain": applied_gain,
+                "events": {
+                    "direct": result.synthesis.direct_events,
+                    "early": result.synthesis.early_events,
+                    "diffuse": result.synthesis.diffuse_events,
+                },
+            }
+            with open(output_path + ".json", "w", encoding="utf-8") as metadata_file:
+                json.dump(metadata, metadata_file, indent=2)
+        except Exception as error:
+            self.report({'ERROR'}, f"Failed to write IR: {error}")
             return {'CANCELLED'}
-        
+
+        summary = (
+            f"{result.synthesis.direct_events} direct, "
+            f"{result.synthesis.early_events} early, "
+            f"{result.synthesis.diffuse_events} diffuse events"
+        )
+        scene.airt_last_render_summary = summary
+        self.report({'INFO'}, f"Saved {os.path.basename(output_path)} — {summary}")
         return {'FINISHED'}
 
-    def _trace_new_hybrid(
-        self, context, source_pos, receiver_pos, bvh, obj_map, config=None
-    ):
-        """New hybrid workflow: separate forward/reverse processing with crossfading."""
-        try:
-            from ..core.ray_tracer import create_ray_tracer, RayTracingConfig, generate_ray_directions
-        except ImportError:
-            self.report({'ERROR'}, "Could not import ray tracer components")
-            return None
-            
-        # Get rendering parameters from context (same as existing trace_impulse_response)
-        if config is None:
-            config = RayTracingConfig(context)
-        directions = generate_ray_directions(config.num_rays)
 
-        # source_pos and receiver_pos are already mathutils.Vector objects from get_scene_sources/receivers
-        
-        # Step 1: Generate standard forward tracer IR (same as when Forward is selected)
-        self.report({'INFO'}, "Generating forward tracer IR...")
-        forward_tracer = create_ray_tracer('FORWARD', config)
-        forward_ir = forward_tracer.trace_rays(source_pos, receiver_pos, bvh, obj_map, directions)
-        
-        if forward_ir is None:
-            self.report({'ERROR'}, "Forward tracer failed")
-            return None
-            
-        # Step 2: Generate standard reverse tracer IR (same as when Reverse is selected)
-        self.report({'INFO'}, "Generating reverse tracer IR...")
-        reverse_config = copy.copy(config)
-        reverse_config.include_direct = False
-        reverse_config.include_primary_diffraction = False
-        reverse_tracer = create_ray_tracer('REVERSE', reverse_config)
-        reverse_ir = reverse_tracer.trace_rays(source_pos, receiver_pos, bvh, obj_map, directions)
-        
-        if reverse_ir is None:
-            self.report({'ERROR'}, "Reverse tracer failed")
-            return None
-            
-        # Apply artistic gain adjustments without destroying the physically
-        # estimated balance between the two components.
-        scene = context.scene
-        forward_gain_db = float(scene.airt_hybrid_forward_gain_db)
-        reverse_gain_db = float(scene.airt_hybrid_reverse_gain_db)
-        
-        if abs(forward_gain_db) > 0.01:  # Only apply if significant gain change
-            forward_gain_linear = 10.0 ** (forward_gain_db / 20.0)
-            forward_ir = forward_ir * forward_gain_linear
-            self.report({'INFO'}, f"Applied forward gain: {forward_gain_db:+.1f} dB")
-        
-        if abs(reverse_gain_db) > 0.01:  # Only apply if significant gain change
-            reverse_gain_linear = 10.0 ** (reverse_gain_db / 20.0)
-            reverse_ir = reverse_ir * reverse_gain_linear
-            self.report({'INFO'}, f"Applied reverse gain: {reverse_gain_db:+.1f} dB")
-        
-        # Step 4: Crossfade processed forward with processed reverse
-        self.report({'INFO'}, "Crossfading forward and reverse IRs...")
-        crossfade_start_ms = float(scene.airt_hybrid_crossfade_start_ms)
-        crossfade_length_ms = float(scene.airt_hybrid_crossfade_length_ms)
-        forward_final_level = float(scene.airt_hybrid_forward_final_level) / 100.0  # Convert % to 0.0-1.0
-        reverse_final_level = float(scene.airt_hybrid_reverse_final_level) / 100.0  # Convert % to 0.0-1.0
-        
-        # Debug reporting
-        self.report({'INFO'}, f"Crossfade: start={crossfade_start_ms}ms, length={crossfade_length_ms}ms, final_forward={forward_final_level*100:.1f}%, final_reverse={reverse_final_level*100:.1f}%")
-        
-        hybrid_ir = self._crossfade_hybrid_irs(forward_ir, reverse_ir, config.sample_rate, crossfade_start_ms, crossfade_length_ms, forward_final_level, reverse_final_level)
-        
-        # Cache the processed forward and reverse IRs for re-mixing.
-        _store_irs_in_cache(context, forward_ir, reverse_ir, config.sample_rate)
-        self.report({'INFO'}, "Cached processed forward and reverse IRs for re-mixing")
-        
-        return hybrid_ir
-    
-    def _crossfade_hybrid_irs(self, forward_ir: np.ndarray, reverse_ir: np.ndarray, sample_rate: int, 
-                             crossfade_start_ms: float, crossfade_length_ms: float, forward_final_level: float, reverse_final_level: float) -> np.ndarray:
-        """Crossfade forward and reverse IRs with independent final level controls."""
-        # Ensure both IRs have the same length
-        min_length = min(forward_ir.shape[1], reverse_ir.shape[1])
-        forward_ir = forward_ir[:, :min_length]
-        reverse_ir = reverse_ir[:, :min_length]
-        
-        # Calculate crossfade timing from user parameters
-        crossfade_start_samples = int((crossfade_start_ms / 1000.0) * sample_rate)
-        crossfade_end_samples = int(((crossfade_start_ms + crossfade_length_ms) / 1000.0) * sample_rate)
-        
-        # Clamp to valid range
-        crossfade_start_samples = max(0, min(crossfade_start_samples, min_length - 1))
-        crossfade_end_samples = max(crossfade_start_samples + 1, min(crossfade_end_samples, min_length))
-        
-        # Create weight arrays
-        forward_weight = np.ones(min_length)
-        reverse_weight = np.ones(min_length)
-        
-        # Early period: 100% forward, 0% reverse
-        forward_weight[:crossfade_start_samples] = 1.0
-        reverse_weight[:crossfade_start_samples] = 0.0
-        
-        # Transition period: independent crossfades for forward and reverse
-        if crossfade_end_samples > crossfade_start_samples:
-            transition_length = crossfade_end_samples - crossfade_start_samples
-            # Forward: fade from 1.0 down to forward_final_level (independent)
-            forward_transition = np.linspace(1.0, forward_final_level, transition_length)
-            # Reverse: fade from 0.0 up to reverse_final_level (independent)
-            reverse_transition = np.linspace(0.0, reverse_final_level, transition_length)
-            
-            forward_weight[crossfade_start_samples:crossfade_end_samples] = forward_transition
-            reverse_weight[crossfade_start_samples:crossfade_end_samples] = reverse_transition
-        
-        # Late period: each tracer at its independent final level
-        forward_weight[crossfade_end_samples:] = forward_final_level
-        reverse_weight[crossfade_end_samples:] = reverse_final_level
-        
-        # Apply weights and combine (both IRs are time-aligned from their common time=0)
-        hybrid_ir = (forward_ir * forward_weight[None, :] + 
-                    reverse_ir * reverse_weight[None, :])
-        
-        return hybrid_ir
-
-
-class AIRT_OT_RemixHybridIR(bpy.types.Operator):
-    """Re-mix cached forward and reverse IRs with new crossfade parameters and export to WAV."""
-    bl_idname = "airt.remix_hybrid_ir"
-    bl_label = "Re-mix Cached IRs"
-    bl_description = "Apply new crossfade settings to cached forward and reverse IRs and export"
-    bl_options = {'REGISTER'}
+class AIRT_OT_AssignSource(bpy.types.Operator):
+    bl_idname = "airt.assign_source"
+    bl_label = "Use Active as Source"
+    bl_description = "Use the active object's evaluated world position as the source"
 
     def execute(self, context):
-        """Execute the re-mix operation using cached IRs."""
-        scene = context.scene
-        
-        # Check if cache is valid
-        if not _is_cache_valid(context):
-            if not scene.airt_hybrid_cache_valid:
-                self.report({'ERROR'}, "No valid cached IRs found. Please run a full hybrid trace first.")
-            else:
-                self.report({'ERROR'}, "Cached IRs are invalid (scene has changed). Please run a full hybrid trace.")
+        active = context.active_object
+        if active is None:
+            self.report({'ERROR'}, "Select an object first")
             return {'CANCELLED'}
-        
-        # Load cached IRs
-        self.report({'INFO'}, "Loading cached forward and reverse IRs...")
-        forward_ir, reverse_ir, sample_rate = _load_irs_from_cache(context)
-        
-        if forward_ir is None or reverse_ir is None:
-            self.report({'ERROR'}, "Failed to load cached IRs")
-            return {'CANCELLED'}
-        
-        self.report({'INFO'}, f"Loaded cached IRs: {forward_ir.shape[0]} channels, {forward_ir.shape[1]} samples at {sample_rate}Hz")
-        
-        # Get current crossfade parameters
-        crossfade_start_ms = float(scene.airt_hybrid_crossfade_start_ms)
-        crossfade_length_ms = float(scene.airt_hybrid_crossfade_length_ms)
-        forward_final_level = float(scene.airt_hybrid_forward_final_level) / 100.0  # Convert % to 0.0-1.0
-        reverse_final_level = float(scene.airt_hybrid_reverse_final_level) / 100.0  # Convert % to 0.0-1.0
-        
-        self.report({'INFO'}, f"Re-mixing with: start={crossfade_start_ms}ms, length={crossfade_length_ms}ms, final_forward={forward_final_level*100:.1f}%, final_reverse={reverse_final_level*100:.1f}%")
-        
-        # Apply crossfade with current parameters
-        hybrid_ir = self._crossfade_hybrid_irs(forward_ir, reverse_ir, sample_rate, crossfade_start_ms, crossfade_length_ms, forward_final_level, reverse_final_level)
-        
-        # Final normalization
-        final_peak = np.max(np.abs(hybrid_ir))
-        if final_peak > 1e-9:
-            final_scale = 1.0 / final_peak
-            hybrid_ir = hybrid_ir * final_scale
-            self.report({'INFO'}, f"Final normalization to 0 dBFS (scale: {final_scale:.6f})")
-        
-        # Export to WAV file
-        if not HAVE_SF:
-            self.report({'ERROR'}, f"Cannot export WAV: {SF_ERROR}")
-            return {'CANCELLED'}
-        
-        # Use the same path generation as main operator, but with timestamp for iterations
-        try:
-            base_wav_path = get_writable_path("ir_output.wav")
-        except Exception as e:
-            self.report({'ERROR'}, f"Failed to determine output path: {str(e)}")
-            return {'CANCELLED'}
-        
-        # Use the same filename as main trace (overwriting is acceptable for iterations)
-        remix_path = base_wav_path
-        
-        try:
-            # Transpose for soundfile (samples x channels)
-            ir_transposed = hybrid_ir.T
-            sf.write(remix_path, ir_transposed, sample_rate, subtype=scene.airt_wav_subtype)
-            
-            # Update last export path
-            scene.airt_hybrid_last_export_path = remix_path
-            
-            import os
-            filename = os.path.basename(remix_path)
-            self.report({'INFO'}, f"Re-mixed hybrid IR exported to: {filename}")
-            self.report({'INFO'}, "Re-mix complete! Load the file in your DAW to audition.")
-            
-        except Exception as e:
-            self.report({'ERROR'}, f"Failed to export WAV: {str(e)}")
-            return {'CANCELLED'}
-        
+        for obj in context.scene.objects:
+            obj.is_acoustic_source = False
+        active.is_acoustic_source = True
+        if active.is_acoustic_receiver:
+            active.is_acoustic_receiver = False
+        context.scene.airt_source_object = active
+        if context.scene.airt_receiver_object == active:
+            context.scene.airt_receiver_object = None
         return {'FINISHED'}
-    
-    def _crossfade_hybrid_irs(self, forward_ir: np.ndarray, reverse_ir: np.ndarray, sample_rate: int, 
-                             crossfade_start_ms: float, crossfade_length_ms: float, forward_final_level: float, reverse_final_level: float) -> np.ndarray:
-        """Crossfade forward and reverse IRs with independent final level controls."""
-        # Ensure both IRs have the same length
-        min_length = min(forward_ir.shape[1], reverse_ir.shape[1])
-        forward_ir = forward_ir[:, :min_length]
-        reverse_ir = reverse_ir[:, :min_length]
-        
-        # Calculate crossfade timing from user parameters
-        crossfade_start_samples = int((crossfade_start_ms / 1000.0) * sample_rate)
-        crossfade_end_samples = int(((crossfade_start_ms + crossfade_length_ms) / 1000.0) * sample_rate)
-        
-        # Clamp to valid range
-        crossfade_start_samples = max(0, min(crossfade_start_samples, min_length - 1))
-        crossfade_end_samples = max(crossfade_start_samples + 1, min(crossfade_end_samples, min_length))
-        
-        # Create weight arrays
-        forward_weight = np.ones(min_length)
-        reverse_weight = np.ones(min_length)
-        
-        # Early period: 100% forward, 0% reverse
-        forward_weight[:crossfade_start_samples] = 1.0
-        reverse_weight[:crossfade_start_samples] = 0.0
-        
-        # Transition period: independent crossfades for forward and reverse
-        if crossfade_end_samples > crossfade_start_samples:
-            transition_length = crossfade_end_samples - crossfade_start_samples
-            # Forward: fade from 1.0 down to forward_final_level (independent)
-            forward_transition = np.linspace(1.0, forward_final_level, transition_length)
-            # Reverse: fade from 0.0 up to reverse_final_level (independent)
-            reverse_transition = np.linspace(0.0, reverse_final_level, transition_length)
-            
-            forward_weight[crossfade_start_samples:crossfade_end_samples] = forward_transition
-            reverse_weight[crossfade_start_samples:crossfade_end_samples] = reverse_transition
-        
-        # Late period: each tracer at its independent final level
-        forward_weight[crossfade_end_samples:] = forward_final_level
-        reverse_weight[crossfade_end_samples:] = reverse_final_level
-        
-        # Apply weights and combine
-        hybrid_ir = (forward_ir * forward_weight[None, :] + 
-                    reverse_ir * reverse_weight[None, :])
-        
-        return hybrid_ir
 
 
-class AIRT_OT_ClearHybridCache(bpy.types.Operator):
-    """Clear cached hybrid IRs to force full retrace."""
-    bl_idname = "airt.clear_hybrid_cache"
-    bl_label = "Clear Cache & Full Retrace"
-    bl_description = "Clear cached forward and reverse IRs to force a complete retrace"
-    bl_options = {'REGISTER'}
+class AIRT_OT_AssignReceiver(bpy.types.Operator):
+    bl_idname = "airt.assign_receiver"
+    bl_label = "Use Active as Receiver"
+    bl_description = "Use the active object's evaluated world position as the HOA receiver"
 
     def execute(self, context):
-        """Clear the hybrid IR cache."""
-        _invalidate_cache(context)
-        self.report({'INFO'}, "Hybrid IR cache cleared. Next trace will be a complete retrace.")
+        active = context.active_object
+        if active is None:
+            self.report({'ERROR'}, "Select an object first")
+            return {'CANCELLED'}
+        for obj in context.scene.objects:
+            obj.is_acoustic_receiver = False
+        active.is_acoustic_receiver = True
+        if active.is_acoustic_source:
+            active.is_acoustic_source = False
+        context.scene.airt_receiver_object = active
+        if context.scene.airt_source_object == active:
+            context.scene.airt_source_object = None
         return {'FINISHED'}
 
 
 class AIRT_OT_ValidateScene(bpy.types.Operator):
-    """Validate scene setup for ray tracing."""
     bl_idname = "airt.validate_scene"
-    bl_label = "Validate Scene"
-    bl_description = "Check scene setup for common issues"
+    bl_label = "Validate Acoustic Scene"
+    bl_description = "Check the selected endpoints, geometry, scale, and output settings"
 
     def execute(self, context):
-        """Execute scene validation."""
         issues = []
         warnings = []
-        
-        # Check for sources and receivers
-        sources = get_scene_sources(context)
-        receivers = get_scene_receivers(context)
-        
-        if not sources:
-            issues.append("No acoustic source objects found")
-        elif len(sources) > 1:
-            warnings.append(f"Multiple sources found ({len(sources)}), using first one")
-        
-        if not receivers:
-            issues.append("No acoustic receiver objects found")
-        elif len(receivers) > 1:
-            warnings.append(f"Multiple receivers found ({len(receivers)}), using first one")
-        
-        # Check for geometry
-        bvh, obj_map = build_bvh(context)
-        if bvh is None:
-            issues.append("No geometry found for ray tracing")
-        else:
-            geo_count = len(obj_map)
-            if geo_count < 4:
-                warnings.append(f"Very few surfaces found ({geo_count}), consider adding more geometry")
-        
-        # Check render settings
-        scene = context.scene
-        if scene.airt_num_rays < 1000:
-            warnings.append("Low ray count may produce noisy results")
-        
-        if scene.airt_max_order > 100:
-            warnings.append("Very high bounce count may slow rendering significantly")
-        
-        # Report results
+        source = _selected_source(context)
+        receiver = _selected_receiver(context)
+        if source is None:
+            issues.append("No Source selected")
+        if receiver is None:
+            issues.append("No Receiver selected")
+        if source is not None and source == receiver:
+            issues.append("Source and Receiver are the same object")
+
+        acoustic_scene = build_acoustic_scene(context)
+        if acoustic_scene.bvh is None:
+            warnings.append("No visible mesh geometry; only direct sound can be rendered")
+        elif len(acoustic_scene.faces) > 100000:
+            warnings.append("Very dense evaluated geometry may slow early-reflection searches")
+        if context.scene.unit_settings.scale_length <= 0.0:
+            issues.append("Scene Unit Scale must be positive")
+        if context.scene.airt_enable_diffraction and len(acoustic_scene.faces) > 50000:
+            warnings.append("Diffraction edge extraction may be expensive for this scene")
+
         if issues:
             self.report({'ERROR'}, "; ".join(issues))
             return {'CANCELLED'}
-        elif warnings:
-            self.report({'WARNING'}, "; ".join(warnings))
-        else:
-            self.report({'INFO'}, "Scene validation passed")
-        
+        message = "Scene is ready"
+        if warnings:
+            message += "; " + "; ".join(warnings)
+        self.report({'WARNING'} if warnings else {'INFO'}, message)
         return {'FINISHED'}
 
 
 class AIRT_OT_ResetMaterial(bpy.types.Operator):
-    """Reset material properties to defaults."""
     bl_idname = "airt.reset_material"
-    bl_label = "Reset Material"
-    bl_description = "Reset selected object's acoustic material to defaults"
+    bl_label = "Reset Acoustic Material"
 
     def execute(self, context):
-        """Execute material reset."""
-        obj = context.object
-        if not obj:
-            self.report({'WARNING'}, "No object selected")
+        obj = context.active_object
+        if obj is None:
             return {'CANCELLED'}
-        
-        # Reset to defaults
+        obj.airt_material_preset = 'CUSTOM'
         obj.absorption = 0.2
         obj.scatter = 0.35
         obj.transmission = 0.0
-        obj.airt_material_preset = 'CUSTOM'
-        
-        # Reset frequency bands
-        default_abs = [0.2] * 7
-        default_scat = [0.35] * 7
-        obj.absorption_bands = default_abs
-        obj.scatter_bands = default_scat
-        
-        self.report({'INFO'}, f"Reset material properties for {obj.name}")
+        obj.absorption_bands = tuple(0.2 for _ in range(NUM_BANDS))
+        obj.scatter_bands = tuple(0.35 for _ in range(NUM_BANDS))
+        obj.transmission_bands = tuple(0.0 for _ in range(NUM_BANDS))
         return {'FINISHED'}
 
 
 class AIRT_OT_CopyMaterial(bpy.types.Operator):
-    """Copy material properties between objects."""
     bl_idname = "airt.copy_material"
-    bl_label = "Copy Material"
-    bl_description = "Copy acoustic material from active to selected objects"
-
-    @classmethod
-    def poll(cls, context):
-        """Check if operator can run."""
-        return context.object is not None and len(context.selected_objects) > 1
+    bl_label = "Copy Acoustic Material to Selected"
+    bl_description = "Copy active-object acoustic coefficients to the other selected objects"
 
     def execute(self, context):
-        """Execute material copying."""
-        source_obj = context.object
-        target_objects = [obj for obj in context.selected_objects if obj != source_obj]
-        
-        if not target_objects:
-            self.report({'WARNING'}, "Need to select target objects")
+        source = context.active_object
+        targets = [obj for obj in context.selected_objects if obj != source]
+        if source is None or not targets:
+            self.report({'ERROR'}, "Select a source object and at least one target")
             return {'CANCELLED'}
-        
-        # Copy properties with error handling
-        copied_count = 0
-        for target_obj in target_objects:
-            try:
-                # Ensure target object has acoustic properties (they should be registered on all objects)
-                target_obj.absorption = source_obj.absorption
-                target_obj.scatter = source_obj.scatter
-                target_obj.transmission = source_obj.transmission
-                target_obj.airt_material_preset = source_obj.airt_material_preset
-                
-                # Copy frequency bands - ensure they exist and have correct length
-                if hasattr(source_obj, 'absorption_bands') and hasattr(target_obj, 'absorption_bands'):
-                    target_obj.absorption_bands = source_obj.absorption_bands[:]
-                if hasattr(source_obj, 'scatter_bands') and hasattr(target_obj, 'scatter_bands'):
-                    target_obj.scatter_bands = source_obj.scatter_bands[:]
-                
-                copied_count += 1
-            except AttributeError as e:
-                self.report({'WARNING'}, f"Failed to copy material to {target_obj.name}: {str(e)}")
-        
-        if copied_count > 0:
-            self.report({'INFO'}, f"Copied material from {source_obj.name} to {copied_count} object(s)")
-            return {'FINISHED'}
-        else:
-            self.report({'ERROR'}, "Failed to copy material to any objects")
-            return {'CANCELLED'}
-
-
-class AIRT_OT_DiagnoseScene(bpy.types.Operator):
-    """Diagnose potential reverb tail issues."""
-    bl_idname = "airt.diagnose_scene"
-    bl_label = "Diagnose Reverb Tail"
-    bl_description = "Analyze scene for issues that could cause short reverb tails"
-
-    def execute(self, context):
-        """Execute scene diagnosis."""
-        scene = context.scene
-        issues = []
-        suggestions = []
-        
-        # Check Russian Roulette settings
-        if scene.airt_rr_enable:
-            if scene.airt_rr_start < 15:
-                issues.append(f"Russian Roulette starts too early (bounce {scene.airt_rr_start})")
-                suggestions.append("Increase RR start bounce to 20+ for longer reverb")
-            
-            if scene.airt_rr_p < 0.93:
-                issues.append(f"Russian Roulette survival too low ({scene.airt_rr_p:.2f})")
-                suggestions.append("Increase survival probability to 0.95+ for longer tails")
-        
-        # Check throughput threshold
-        if hasattr(scene, 'airt_min_throughput'):
-            threshold = scene.airt_min_throughput
-            if threshold > 5e-6:
-                issues.append(f"Throughput threshold too high ({threshold:.1e})")
-                suggestions.append("Reduce min throughput to 1e-6 or lower")
-        
-        # Check material properties
-        try:
-            sources = get_scene_sources(context)
-            receivers = get_scene_receivers(context)
-            
-            if sources and receivers:
-                # Check if room is too absorptive
-                bvh, obj_map = build_bvh(context)
-                if obj_map:
-                    absorptions = []
-                    for obj in obj_map:
-                        if obj and hasattr(obj, 'absorption'):
-                            absorptions.append(obj.absorption)
-                    
-                    if absorptions:
-                        avg_absorption = sum(absorptions) / len(absorptions)
-                        if avg_absorption > 0.3:
-                            issues.append(f"Room very absorptive (avg {avg_absorption:.2f})")
-                            suggestions.append("Reduce wall absorption for longer reverb")
-                        elif avg_absorption < 0.05:
-                            suggestions.append(f"Room reflective (avg {avg_absorption:.2f}) - good for reverb")
-        
-        except Exception as e:
-            issues.append(f"Error analyzing geometry: {e}")
-        
-        # Check ray count
-        if scene.airt_num_rays < 4000:
-            suggestions.append(f"Low ray count ({scene.airt_num_rays}) may cause noise")
-        
-        # Check max bounces
-        if scene.airt_max_order < 50:
-            issues.append(f"Max bounces too low ({scene.airt_max_order})")
-            suggestions.append("Increase max bounces to 100+ for full reverb decay")
-        
-        # Report results
-        if issues:
-            self.report({'ERROR'}, f"Found {len(issues)} issue(s): " + "; ".join(issues[:3]))
-            for suggestion in suggestions[:3]:
-                self.report({'INFO'}, f"Suggestion: {suggestion}")
-        else:
-            self.report({'INFO'}, "No obvious issues found with reverb settings")
-            if suggestions:
-                for suggestion in suggestions[:2]:
-                    self.report({'INFO'}, f"Tip: {suggestion}")
-        
+        for target in targets:
+            target.airt_material_preset = source.airt_material_preset
+            target.absorption = source.absorption
+            target.scatter = source.scatter
+            target.transmission = source.transmission
+            target.absorption_bands = tuple(source.absorption_bands)
+            target.scatter_bands = tuple(source.scatter_bands)
+            target.transmission_bands = tuple(source.transmission_bands)
+        self.report({'INFO'}, f"Copied acoustic material to {len(targets)} object(s)")
         return {'FINISHED'}
 
 
 class AIRT_OT_CheckDependencies(bpy.types.Operator):
-    """Check and report addon dependencies status."""
     bl_idname = "airt.check_dependencies"
-    bl_label = "Check Dependencies"
-    bl_description = "Check if required Python packages are installed"
+    bl_label = "Check Audio Dependency"
 
-    def execute(self, context):
-        """Check dependencies and provide installation instructions."""
-        import sys
-        
-        # Check soundfile
-        sf_available, sf_error = check_soundfile_availability()
-        
-        if sf_available:
-            self.report({'INFO'}, "✓ soundfile is available")
-        else:
-            self.report({'ERROR'}, f"✗ soundfile not available: {sf_error}")
-            
-            # Provide installation commands
-            blender_python = sys.executable
-            pip_cmd = f'"{blender_python}" -m pip install soundfile'
-            
-            self.report({'INFO'}, f"Install command: {pip_cmd}")
-            self.report({'INFO'}, "Or restart Blender after installing soundfile")
-        
-        self.report({'INFO'}, "✓ ACN/SN3D spherical harmonics are built in")
-        
-        # Check numpy
-        try:
-            import numpy
-            self.report({'INFO'}, f"✓ numpy is available (version {numpy.__version__})")
-        except ImportError:
-            self.report({'ERROR'}, "✗ numpy not available (critical dependency)")
-        
-        return {'FINISHED'}
-
-
-class AIRT_OT_HybridPreset(bpy.types.Operator):
-    """Apply hybrid balance presets for common acoustic scenarios."""
-    bl_idname = "airt.hybrid_preset"
-    bl_label = "Apply Hybrid Preset"
-    bl_description = "Apply preset hybrid balance settings for specific acoustic scenarios"
-    bl_options = {'REGISTER', 'UNDO'}
-    
-    # Properties for the preset values
-    forward_gain: bpy.props.FloatProperty(name="Forward Gain (dB)", default=0.0, min=-24.0, max=24.0)
-    reverse_gain: bpy.props.FloatProperty(name="Reverse Gain (dB)", default=0.0, min=-24.0, max=24.0)
-    ramp_time: bpy.props.FloatProperty(name="Ramp Time (s)", default=0.2)
-    
-    def execute(self, context):
-        """Apply the preset values to the scene."""
-        scene = context.scene
-        
-        # Apply the preset values
-        scene.airt_hybrid_forward_gain_db = self.forward_gain
-        scene.airt_hybrid_reverse_gain_db = self.reverse_gain  
-        scene.airt_hybrid_reverb_ramp_time = self.ramp_time
-        
-        # Report what was applied
-        if self.forward_gain == 0.0 and self.reverse_gain == 0.0 and self.ramp_time == 0.2:
-            preset_name = "Reset to defaults"
-        elif self.forward_gain > 0 and self.reverse_gain < 0:
-            preset_name = "Tunnel/Corridor (enhanced echoes)"
-        elif self.forward_gain < 0 and self.reverse_gain > 0:
-            preset_name = "Cathedral (lush reverb)"
-        else:
-            preset_name = "Custom settings"
-            
-        self.report({'INFO'}, f"Applied hybrid preset: {preset_name}")
-        
-        return {'FINISHED'}
+    def execute(self, _context):
+        available, module_or_error = check_soundfile_availability()
+        if available:
+            self.report({'INFO'}, f"python-soundfile {module_or_error.__version__} is available")
+            return {'FINISHED'}
+        self.report({'ERROR'}, f"python-soundfile is unavailable: {module_or_error}")
+        return {'CANCELLED'}

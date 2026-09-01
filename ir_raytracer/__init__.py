@@ -2,16 +2,15 @@
 """
 Ambisonic IR Tracer for Blender
 
-A Blender add-on that renders third-order ambisonic (ACN/SN3D) impulse responses 
-directly from scene geometry using forward and reverse ray-tracing strategies.
+A Blender add-on that renders third-order ambisonic (ACN/SN3D) impulse responses
+from scene geometry using receiver-centric acoustic energy transport.
 
 Features:
 - Third-order ambisonic encoding with configurable orientation offsets
-- Forward (stochastic) and reverse (specular) tracing modes
+- Deterministic direct/early paths and stochastic diffuse transport
 - Per-object acoustic materials with frequency-dependent properties
-- Russian roulette termination and micro-roughness controls
-- Simple diffraction sampling and frequency-dependent air absorption
-- Batch averaging across multiple randomized passes
+- Russian roulette termination and frequency-dependent air absorption
+- Optional bounded edge diffraction
 """
 
 bl_info = {
@@ -19,8 +18,8 @@ bl_info = {
     "blender": (5, 2, 1),
     "category": "Object",
     "author": "ChatGPT + Hector Centeno",
-    "description": "Trace impulse responses with 3rd-order ambisonic encoding (ACN/SN3D) using reverse ray tracing with specular and diffuse reflections",
-    "version": (1, 0, 1),
+    "description": "Create artistic 3rd-order ambisonic IRs from Blender geometry and acoustic materials",
+    "version": (2, 0, 0),
     "location": "3D Viewport > Sidebar > IR Tracer",
     "doc_url": "",
     "tracker_url": "",
@@ -41,14 +40,12 @@ from .ui.panels import (
 )
 from .ui.operators import (
     AIRT_OT_RenderIR,
-    AIRT_OT_RemixHybridIR,
-    AIRT_OT_ClearHybridCache,
+    AIRT_OT_AssignSource,
+    AIRT_OT_AssignReceiver,
     AIRT_OT_ValidateScene,
     AIRT_OT_ResetMaterial,
     AIRT_OT_CopyMaterial,
-    AIRT_OT_DiagnoseScene,
     AIRT_OT_CheckDependencies,
-    AIRT_OT_HybridPreset
 )
 
 
@@ -63,14 +60,12 @@ classes = [
     
     # Operators
     AIRT_OT_RenderIR,
-    AIRT_OT_RemixHybridIR,
-    AIRT_OT_ClearHybridCache,
+    AIRT_OT_AssignSource,
+    AIRT_OT_AssignReceiver,
     AIRT_OT_ValidateScene,
     AIRT_OT_ResetMaterial,
     AIRT_OT_CopyMaterial,
-    AIRT_OT_DiagnoseScene,
     AIRT_OT_CheckDependencies,
-    AIRT_OT_HybridPreset,
 ]
 
 

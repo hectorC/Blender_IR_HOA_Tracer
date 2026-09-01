@@ -1,556 +1,398 @@
-# -*- coding: utf-8 -*-
-"""
-Property definitions and registration for the Ambisonic IR Tracer.
-"""
+"""Artist-facing Blender properties for the unified acoustic renderer."""
+from __future__ import annotations
+
 import bpy
+
 from ..core.acoustics import MATERIAL_PRESET_DATA, MATERIAL_PRESETS, NUM_BANDS
 
 
-def _avg(values):
-    """Calculate average of values."""
-    return float(sum(values)) / max(len(values), 1)
+_MATERIAL_GUARD = set()
+_QUALITY_GUARD = set()
 
 
-def _band_label(freq_hz: float) -> str:
-    """Generate human-readable label for frequency band."""
-    if freq_hz >= 1000.0:
-        return f"{int(freq_hz / 1000.0)} kHz"
-    return f"{int(freq_hz)} Hz"
+QUALITY_PROFILES = {
+    'PREVIEW': {
+        'airt_num_rays': 512,
+        'airt_max_order': 24,
+        'airt_rr_start': 12,
+        'airt_rr_p': 0.95,
+        'airt_min_throughput': 1e-5,
+    },
+    'BALANCED': {
+        'airt_num_rays': 1024,
+        'airt_max_order': 32,
+        'airt_rr_start': 20,
+        'airt_rr_p': 0.97,
+        'airt_min_throughput': 1e-6,
+    },
+    'HIGH': {
+        'airt_num_rays': 4096,
+        'airt_max_order': 64,
+        'airt_rr_start': 32,
+        'airt_rr_p': 0.98,
+        'airt_min_throughput': 1e-6,
+    },
+}
 
 
-# Global state for preventing circular updates
-_MATERIAL_PRESET_GUARD = set()
-
-
-def _update_material_preset(self, context):
-    """Update callback for material preset changes."""
-    preset = getattr(self, 'airt_material_preset', 'CUSTOM')
-    if preset == 'CUSTOM':
-        return
-    
-    values = MATERIAL_PRESETS.get(preset)
-    if not values:
-        return
-    
-    key = id(self)
-    _MATERIAL_PRESET_GUARD.add(key)
-    try:
-        self.absorption = float(values['absorption'])
-        self.scatter = float(values['scatter'])
-        self.absorption_bands = values['absorption_spectrum']
-        self.scatter_bands = values['scatter_spectrum']
-    finally:
-        _MATERIAL_PRESET_GUARD.discard(key)
-
-
-def _update_tracing_mode_defaults(self, context):
-    """Update segment capture default when tracing mode changes."""
-    if self.airt_trace_mode == 'FORWARD':
-        # Forward tracing needs segment capture
-        self.airt_enable_seg_capture = True
-    elif self.airt_trace_mode == 'HYBRID':
-        # Hybrid mode uses segment capture in forward component
-        self.airt_enable_seg_capture = True
-    elif self.airt_trace_mode == 'REVERSE':
-        # Reverse tracing can work without segment capture
-        pass  # Leave current setting
-    
-    # Invalidate cache when tracing mode changes (affects results)
-    _invalidate_hybrid_cache(context)
-
-
-def _invalidate_hybrid_cache(context):
-    """Invalidate hybrid IR cache when scene parameters change."""
-    if context and hasattr(context, 'scene'):
-        scene = context.scene
-        if hasattr(scene, 'airt_hybrid_cache_valid'):
-            scene.airt_hybrid_cache_valid = False
-
-
-def _update_cache_invalidating_property(self, context):
-    """Update callback for properties that should invalidate the hybrid cache."""
-    _invalidate_hybrid_cache(context)
-
-
-def _mark_material_custom(self, context):
-    """Mark material as custom when properties are manually changed."""
-    key = id(self)
-    if key in _MATERIAL_PRESET_GUARD:
-        return
-    if getattr(self, 'airt_material_preset', 'CUSTOM') != 'CUSTOM':
-        self.airt_material_preset = 'CUSTOM'
-
-
-def create_material_preset_items():
-    """Create material preset items for EnumProperty."""
-    items = [('CUSTOM', 'Custom', 'User-defined absorption/scatter spectra')]
-    
-    for identifier, label, _, _ in MATERIAL_PRESET_DATA:
+def _material_items():
+    items = [('CUSTOM', 'Custom', 'User-defined acoustic coefficients')]
+    for identifier, label, _absorption, _scatter in MATERIAL_PRESET_DATA:
         preset = MATERIAL_PRESETS[identifier]
-        desc = (
-            f"{label}: avg absorption {preset['absorption']:.2f}, "
-            f"avg scatter {preset['scatter']:.2f}"
-        )
-        items.append((identifier, label, desc))
-    
+        items.append((
+            identifier,
+            label,
+            f"Average absorption {preset['absorption']:.2f}, scattering {preset['scatter']:.2f}",
+        ))
     return items
 
 
+def _update_material_preset(self, _context):
+    preset = MATERIAL_PRESETS.get(getattr(self, 'airt_material_preset', 'CUSTOM'))
+    if preset is None:
+        return
+    key = id(self)
+    _MATERIAL_GUARD.add(key)
+    try:
+        self.absorption = float(preset['absorption'])
+        self.scatter = float(preset['scatter'])
+        self.transmission = 0.0
+        self.absorption_bands = preset['absorption_spectrum']
+        self.scatter_bands = preset['scatter_spectrum']
+        self.transmission_bands = tuple(0.0 for _ in range(NUM_BANDS))
+    finally:
+        _MATERIAL_GUARD.discard(key)
+
+
+def _mark_material_custom(self, _context):
+    if id(self) not in _MATERIAL_GUARD and self.airt_material_preset != 'CUSTOM':
+        self.airt_material_preset = 'CUSTOM'
+
+
+def _update_quality_profile(self, _context):
+    profile = QUALITY_PROFILES.get(getattr(self, 'airt_quality_preset', 'CUSTOM'))
+    if profile is None:
+        return
+    key = id(self)
+    _QUALITY_GUARD.add(key)
+    try:
+        for property_name, value in profile.items():
+            setattr(self, property_name, value)
+    finally:
+        _QUALITY_GUARD.discard(key)
+
+
+def _mark_quality_custom(self, _context):
+    if id(self) not in _QUALITY_GUARD and self.airt_quality_preset != 'CUSTOM':
+        self.airt_quality_preset = 'CUSTOM'
+
+
 def register_acoustic_props():
-    """Register acoustic properties on Blender object and scene types."""
-    # Object properties for acoustic materials
-    bpy.types.Object.airt_material_preset = bpy.props.EnumProperty(
-        name="Material Preset",
-        description="Apply common material absorption/scatter values",
-        items=create_material_preset_items(),
+    obj = bpy.types.Object
+    scene = bpy.types.Scene
+
+    obj.airt_material_preset = bpy.props.EnumProperty(
+        name="Acoustic Material",
+        description="Starting point for frequency-dependent absorption and scattering",
+        items=_material_items(),
         default='CUSTOM',
-        update=_update_material_preset
+        update=_update_material_preset,
     )
-    
-    bpy.types.Object.absorption = bpy.props.FloatProperty(
+    obj.absorption = bpy.props.FloatProperty(
         name="Absorption",
-        description="Average absorption coefficient: 0.0 = perfectly reflective, 1.0 = fully absorbent (anechoic)",
+        description="Broadband absorbed-energy fraction",
         default=0.2,
         min=0.0,
         max=1.0,
-        update=_mark_material_custom
+        update=_mark_material_custom,
     )
-    
-    bpy.types.Object.absorption_bands = bpy.props.FloatVectorProperty(
-        name="Absorption Spectrum",
-        description="Frequency-dependent absorption for octave bands (125 Hz to 8 kHz). Use for realistic material modeling",
+    obj.absorption_bands = bpy.props.FloatVectorProperty(
+        name="Absorption Bands",
+        description="Energy absorption at 125 Hz through 8 kHz",
         size=NUM_BANDS,
         min=0.0,
         max=1.0,
-        subtype='NONE',
         default=tuple(0.2 for _ in range(NUM_BANDS)),
-        update=_mark_material_custom
+        update=_mark_material_custom,
     )
-    
-    bpy.types.Object.scatter = bpy.props.FloatProperty(
+    obj.scatter = bpy.props.FloatProperty(
         name="Scattering",
-        description="Diffuse vs specular reflection balance: 0.0 = mirror-like, 1.0 = completely diffuse",
+        description="Fraction of reflected energy distributed diffusely",
         default=0.35,
         min=0.0,
         max=1.0,
-        update=_mark_material_custom
+        update=_mark_material_custom,
     )
-    
-    bpy.types.Object.scatter_bands = bpy.props.FloatVectorProperty(
-        name="Scatter Spectrum",
-        description="Frequency-dependent scattering (fraction of energy sent to diffuse lobe)",
+    obj.scatter_bands = bpy.props.FloatVectorProperty(
+        name="Scattering Bands",
+        description="Diffuse-reflection fraction at 125 Hz through 8 kHz",
         size=NUM_BANDS,
         min=0.0,
         max=1.0,
-        subtype='NONE',
         default=tuple(0.35 for _ in range(NUM_BANDS)),
-        update=_mark_material_custom
+        update=_mark_material_custom,
     )
-    
-    bpy.types.Object.transmission = bpy.props.FloatProperty(
+    obj.transmission = bpy.props.FloatProperty(
         name="Transmission",
-        description="Fraction of sound energy transmitted through surface. 0.0 = opaque wall, 1.0 = no barrier effect",
+        description="Broadband energy fraction passing through the surface",
         default=0.0,
         min=0.0,
         max=1.0,
-        update=_mark_material_custom
+        update=_mark_material_custom,
     )
-    
-    bpy.types.Object.is_acoustic_source = bpy.props.BoolProperty(
+    obj.transmission_bands = bpy.props.FloatVectorProperty(
+        name="Transmission Bands",
+        description="Transmitted-energy fraction at 125 Hz through 8 kHz",
+        size=NUM_BANDS,
+        min=0.0,
+        max=1.0,
+        default=tuple(0.0 for _ in range(NUM_BANDS)),
+        update=_mark_material_custom,
+    )
+    obj.is_acoustic_source = bpy.props.BoolProperty(
         name="Acoustic Source",
-        description="Mark this object as a sound source (speaker/instrument position)",
-        default=False
+        description="Use this object's evaluated world position as a sound source",
+        default=False,
     )
-    
-    bpy.types.Object.is_acoustic_receiver = bpy.props.BoolProperty(
+    obj.is_acoustic_receiver = bpy.props.BoolProperty(
         name="Acoustic Receiver",
-        description="Mark this object as a microphone position for impulse response capture",
-        default=False
+        description="Use this object's evaluated world position as the HOA receiver",
+        default=False,
     )
-    
-    # UI state property for frequency details
-    bpy.types.Object.show_frequency_details = bpy.props.BoolProperty(
-        name="Show Frequency Details",
-        description="Show detailed frequency response controls",
-        default=False
-    )
-    
-    # Scene properties for render settings
-    scene = bpy.types.Scene
-    
-    # Basic ray tracing parameters
-    scene.airt_num_rays = bpy.props.IntProperty(
-        name="Rays per Pass",
-        description="Number of rays to trace per pass. More rays = better quality, slower render. 8192-16384 recommended for good quality",
-        default=8192, 
-        min=128, 
-        max=131072,
-        update=_update_cache_invalidating_property
-    )
-    
-    scene.airt_passes = bpy.props.IntProperty(
-        name="Averaging Passes",
-        description="Multiple passes are averaged for smoother results. 4-8 passes recommended for final renders",
-        default=4, 
-        min=1, 
-        max=32,
-        update=_update_cache_invalidating_property
-    )
-    
-    scene.airt_max_order = bpy.props.IntProperty(
-        name="Max Bounces",
-        description="Maximum ray bounces before termination. Higher values capture longer reverb tails (50-100 recommended)",
-        default=64, 
-        min=0, 
-        max=1000,
-        update=_update_cache_invalidating_property
-    )
-    
-    scene.airt_sr = bpy.props.IntProperty(
-        name="Sample Rate (Hz)",
-        description="Audio sample rate for impulse response output. Higher rates preserve more high-frequency detail",
-        default=48000, 
-        min=8000, 
-        max=192000,
-        update=_update_cache_invalidating_property
-    )
-    
-    scene.airt_ir_seconds = bpy.props.FloatProperty(
-        name="Duration (seconds)",
-        description="Length of impulse response to generate. Should be long enough to capture full reverb decay", 
-        default=2.0, 
-        min=0.1, 
-        max=20.0
-    )
-    
-    scene.airt_angle_tol_deg = bpy.props.FloatProperty(
-        name="Specular Tolerance (°)",
-        description="Angular tolerance for specular reflection detection. Lower values = more precise specular behavior",
-        default=8.0, 
-        min=0.1, 
-        max=30.0
-    )
-    
-    scene.airt_wav_subtype = bpy.props.EnumProperty(
-        name="WAV Format",
-        description="Audio bit depth and format for output file. Float recommended for professional use",
-        items=[
-            ('FLOAT', '32-bit Float', '32-bit IEEE float (recommended for impulse responses)'),
-            ('PCM_24', '24-bit PCM', '24-bit integer PCM (good quality, smaller files)'),
-            ('PCM_16', '16-bit PCM', '16-bit integer PCM (smallest files, CD quality)')
-        ],
-        default='FLOAT'
+    obj.show_frequency_details = bpy.props.BoolProperty(
+        name="Band Details",
+        default=False,
     )
 
+    scene.airt_source_object = bpy.props.PointerProperty(
+        name="Source",
+        description="Object whose evaluated world position defines the source",
+        type=bpy.types.Object,
+    )
+    scene.airt_receiver_object = bpy.props.PointerProperty(
+        name="Receiver",
+        description="Object whose evaluated world position defines the ambisonic listener",
+        type=bpy.types.Object,
+    )
+    scene.airt_quality_preset = bpy.props.EnumProperty(
+        name="Render Quality",
+        description="Choose a practical ray budget or customize the advanced settings",
+        items=[
+            ('PREVIEW', 'Preview', 'Fast spatial and decay preview'),
+            ('BALANCED', 'Balanced', 'Recommended starting point'),
+            ('HIGH', 'High', 'Smoother final render'),
+            ('CUSTOM', 'Custom', 'Manually configured ray settings'),
+        ],
+        default='BALANCED',
+        update=_update_quality_profile,
+    )
+    scene.airt_num_rays = bpy.props.IntProperty(
+        name="Listener Rays",
+        description="Directions sampled from the receiver; more rays reduce diffuse-tail variance",
+        default=1024,
+        min=128,
+        max=131072,
+        update=_mark_quality_custom,
+    )
+    scene.airt_max_order = bpy.props.IntProperty(
+        name="Maximum Bounces",
+        description="Maximum stochastic surface interactions",
+        default=32,
+        min=1,
+        max=512,
+        update=_mark_quality_custom,
+    )
+    scene.airt_sr = bpy.props.EnumProperty(
+        name="Sample Rate",
+        items=[
+            ('44100', '44.1 kHz', '44,100 samples per second'),
+            ('48000', '48 kHz', '48,000 samples per second'),
+            ('96000', '96 kHz', '96,000 samples per second'),
+            ('192000', '192 kHz', '192,000 samples per second'),
+        ],
+        default='48000',
+    )
+    scene.airt_ir_seconds = bpy.props.FloatProperty(
+        name="IR Duration",
+        description="Rendered impulse-response duration in seconds",
+        default=2.0,
+        min=0.1,
+        max=20.0,
+        precision=2,
+    )
     scene.airt_output_content = bpy.props.EnumProperty(
         name="IR Content",
-        description="Choose whether the rendered IR includes the line-of-sight direct sound",
         items=[
-            ('FULL', 'Full IR', 'Include one line-of-sight direct arrival plus room reflections'),
-            ('REVERB_ONLY', 'Reverb Only', 'Suppress the direct arrival while retaining reflections and the reverb tail')
+            ('FULL', 'Full IR', 'Direct sound, early reflections, and diffuse field'),
+            ('REFLECTIONS', 'Wet Reflections', 'Early reflections and diffuse field without direct sound'),
+            ('DIFFUSE', 'Diffuse Field Only', 'Stochastic reflected field without direct or deterministic early events'),
         ],
         default='FULL',
-        update=_update_cache_invalidating_property
     )
-    
+    scene.airt_early_reflections = bpy.props.BoolProperty(
+        name="Deterministic Early Reflections",
+        description="Resolve first-order planar specular reflections explicitly",
+        default=True,
+    )
+    scene.airt_early_gain_db = bpy.props.FloatProperty(
+        name="Early Gain",
+        description="Artistic gain applied to deterministic early reflections",
+        default=0.0,
+        min=-24.0,
+        max=24.0,
+    )
+    scene.airt_diffuse_gain_db = bpy.props.FloatProperty(
+        name="Diffuse Gain",
+        description="Artistic gain applied to the stochastic reverberant field",
+        default=0.0,
+        min=-24.0,
+        max=24.0,
+    )
     scene.airt_seed = bpy.props.IntProperty(
         name="Random Seed",
-        description="Seed for random number generation. Use same seed for reproducible results", 
-        default=0, 
-        min=0
+        description="Use a nonzero seed for repeatable renders; zero creates a new realization",
+        default=1,
+        min=0,
     )
-    
-    scene.airt_recv_radius = bpy.props.FloatProperty(
-        name="Receiver Radius (m)",
-        description="Radius of spherical receiver for ray capture. Larger radius = more rays captured, but less precise",
-        default=0.25, 
-        min=0.001, 
-        max=2.0
-    )
-    
-    # Tracing mode with intelligent defaults
-    scene.airt_trace_mode = bpy.props.EnumProperty(
-        name="Tracing Mode",
-        description="Ray tracing algorithm to use",
-        items=[
-            ('HYBRID', 'Hybrid Tracing (Recommended)', 'Combines Forward + Reverse for optimal early reflections and reverb tail'),
-            ('FORWARD', 'Forward Only', 'Trace from source to room: good for early reflections, less efficient for late reverb'),
-            ('REVERSE', 'Reverse Only', 'Trace from receiver backward: efficient for reverb, may miss some early reflection details')
-        ],
-        default='HYBRID',
-        update=_update_tracing_mode_defaults
-    )
-    
-    # HYBRID CROSSFADE CONTROLS - New workflow crossfade timing and balance
-    scene.airt_hybrid_forward_gain_db = bpy.props.FloatProperty(
-        name="Forward Tracer Gain (dB)",
-        description="Boost/cut discrete echoes and early reflections. +dB = stronger echoes, -dB = softer echoes",
-        default=0.0,
-        min=-24.0,
-        max=24.0,
-        step=10,  # 0.1 dB steps
-        precision=1
-    )
-    
-    scene.airt_hybrid_reverse_gain_db = bpy.props.FloatProperty(
-        name="Reverse Tracer Gain (dB)", 
-        description="Boost/cut diffuse reverb tail. +dB = lusher reverb, -dB = drier sound",
-        default=0.0,
-        min=-24.0,
-        max=24.0,
-        step=10,  # 0.1 dB steps
-        precision=1
-    )
-    
-    scene.airt_hybrid_crossfade_start_ms = bpy.props.FloatProperty(
-        name="Crossfade Start (ms)",
-        description="Time when crossfade from forward to reverse begins. Earlier = more diffuse sound, Later = more discrete echoes",
-        default=50.0,
+    scene.airt_spec_rough_deg = bpy.props.FloatProperty(
+        name="Specular Roughness",
+        description="Angular width of stochastic glossy reflection lobes",
+        default=8.0,
         min=0.0,
-        max=2000.0,
-        step=100,  # 1ms steps
-        precision=1
+        max=45.0,
     )
-    
-    scene.airt_hybrid_crossfade_length_ms = bpy.props.FloatProperty(
-        name="Crossfade Length (ms)",
-        description="Duration of the crossfade transition. Shorter = abrupt change, Longer = smoother blend",
-        default=150.0,  # 200ms - 50ms = 150ms current length
-        min=10.0,
-        max=1000.0,
-        step=100,  # 1ms steps
-        precision=1
-    )
-    
-    scene.airt_hybrid_forward_final_level = bpy.props.FloatProperty(
-        name="Forward Final Level (%)",
-        description="Final level of forward tracer after crossfade. 0% = completely fade out, 100% = no fade, 20% = keep some discrete late reflections",
-        default=0.0,
-        min=0.0,
-        max=100.0,
-        step=100,  # 1% steps
-        precision=1,
-        subtype='PERCENTAGE'
-    )
-    
-    scene.airt_hybrid_reverse_final_level = bpy.props.FloatProperty(
-        name="Reverse Final Level (%)",
-        description="Final level of reverse tracer after crossfade. 100% = full reverb tail, 50% = attenuated reverb, 0% = no reverb tail",
-        default=100.0,
-        min=0.0,
-        max=100.0,
-        step=100,  # 1% steps
-        precision=1,
-        subtype='PERCENTAGE'
-    )
-    
-    # Hybrid IR cache properties for re-mixing
-    scene.airt_hybrid_cache_valid = bpy.props.BoolProperty(
-        name="Hybrid Cache Valid",
-        description="Whether cached forward and reverse IRs are available for re-mixing",
-        default=False
-    )
-    
-    scene.airt_hybrid_cache_forward_ir = bpy.props.StringProperty(
-        name="Cached Forward IR",
-        description="Base64 encoded forward IR data for re-mixing",
-        default=""
-    )
-    
-    scene.airt_hybrid_cache_reverse_ir = bpy.props.StringProperty(
-        name="Cached Reverse IR",
-        description="Base64 encoded reverse IR data for re-mixing",
-        default=""
-    )
-    
-    scene.airt_hybrid_cache_sample_rate = bpy.props.IntProperty(
-        name="Cached Sample Rate",
-        description="Sample rate of cached IRs",
-        default=0
-    )
-    
-    scene.airt_hybrid_cache_ir_length = bpy.props.IntProperty(
-        name="Cached IR Length",
-        description="Length in samples of cached IRs",
-        default=0
-    )
-    
-    scene.airt_hybrid_cache_channels = bpy.props.IntProperty(
-        name="Cached Channels",
-        description="Number of channels in cached IRs",
-        default=0
-    )
-    
-    scene.airt_hybrid_cache_scene_hash = bpy.props.StringProperty(
-        name="Cached Scene Hash",
-        description="Hash of scene parameters used to validate cache",
-        default=""
-    )
-    
-    scene.airt_hybrid_last_export_path = bpy.props.StringProperty(
-        name="Last Export Path",
-        description="Path of the last exported hybrid IR file",
-        default=""
-    )
-    
-    # Russian roulette settings
     scene.airt_rr_enable = bpy.props.BoolProperty(
-        name="Russian Roulette Termination",
-        description="Probabilistically terminate low-energy rays to improve performance. Disable for maximum accuracy",
-        default=True
+        name="Russian Roulette",
+        description="Unbiased probabilistic termination of long paths",
+        default=True,
     )
-    
     scene.airt_rr_start = bpy.props.IntProperty(
         name="Start Bounce",
-        description="Bounce number to start Russian Roulette termination. Higher values = more accurate reverb tail",
-        default=40,  # Increased from 30 to 40 - more conservative for occlusion scenarios
-        min=0, 
-        max=1000
+        default=20,
+        min=1,
+        max=512,
+        update=_mark_quality_custom,
     )
-    
     scene.airt_rr_p = bpy.props.FloatProperty(
         name="Survival Probability",
-        description="Probability ray survives Russian Roulette. Higher values = longer reverb tails, slower performance",
-        default=0.99,  # Increased from 0.97 to 0.99 - even higher survival rate for occlusion
-        min=0.05, 
-        max=1.0
+        default=0.97,
+        min=0.5,
+        max=1.0,
+        update=_mark_quality_custom,
     )
-    
-    # Surface roughness
-    scene.airt_spec_rough_deg = bpy.props.FloatProperty(
-        name="Specular Roughness (°)",
-        description="Angular spread of specular reflections. 0 = perfect mirror, higher = more diffuse specular",
-        default=5.0, 
-        min=0.0, 
-        max=30.0
-    )
-    
-    # Advanced features
-    scene.airt_enable_seg_capture = bpy.props.BoolProperty(
-        name="Segment Capture",
-        description="Capture ray energy along segments (essential for Forward tracing, optional for Reverse tracing)",
-        default=True
-    )
-    
-    scene.airt_enable_diffraction = bpy.props.BoolProperty(
-        name="Enable diffraction",
-        description="Add an optional artistic single-edge shadow approximation around sharp and boundary mesh edges",
-        default=False
-    )
-    
-    scene.airt_diffraction_samples = bpy.props.IntProperty(
-        name="Diffraction paths",
-        description="Maximum nearby visible edge paths averaged for each blocked connection",
-        default=6, 
-        min=0, 
-        max=64
-    )
-    
-    scene.airt_diffraction_max_deg = bpy.props.FloatProperty(
-        name="Diffraction max angle",
-        description="Reject edge detours that bend more sharply than this angle",
-        default=45.0, 
-        min=0.0, 
-        max=90.0
-    )
-    
-    # Orientation controls
-    scene.airt_yaw_offset_deg = bpy.props.FloatProperty(
-        name="Yaw offset (deg)", 
-        default=0.0, 
-        min=-180.0, 
-        max=180.0
-    )
-    
-    scene.airt_invert_z = bpy.props.BoolProperty(
-        name="Flip Z (up/down)", 
-        default=False
-    )
-    
-    scene.airt_calibrate_direct = bpy.props.BoolProperty(
-        name="Calibrate direct (1/r)",
-        description="In Full IR mode, scale the IR so the direct W-channel amplitude follows 1/distance",
-        default=True,
-        update=_update_cache_invalidating_property
-    )
-    
-    # Air absorption settings
-    scene.airt_air_enable = bpy.props.BoolProperty(
-        name="Air absorption (freq)", 
-        default=True
-    )
-    
-    scene.airt_air_temp_c = bpy.props.FloatProperty(
-        name="Air temp (deg C)", 
-        default=20.0, 
-        min=-30.0, 
-        max=50.0
-    )
-    
-    scene.airt_air_humidity = bpy.props.FloatProperty(
-        name="Rel humidity (%)", 
-        default=50.0, 
-        min=0.0, 
-        max=100.0
-    )
-    
-    scene.airt_air_pressure_kpa = bpy.props.FloatProperty(
-        name="Air pressure (kPa)", 
-        default=101.325, 
-        min=80.0, 
-        max=110.0
-    )
-    
-    # Output options
-    scene.airt_quick_broadband = bpy.props.BoolProperty(
-        name="Quick mode (broadband)",
-        description="Bypass multi-band path filtering for speed; writes broadband impulses",
-        default=False
-    )
-    
-    # Internal threshold for ray termination
     scene.airt_min_throughput = bpy.props.FloatProperty(
-        name="Min throughput",
-        description="Minimum ray energy before termination",
-        default=1e-6,  # Changed from 1e-4 to 1e-6 - allow much weaker rays
-        min=1e-8,      # Changed from 1e-6 to 1e-8
-        max=1e-2
+        name="Minimum Path Energy",
+        default=1e-6,
+        min=1e-10,
+        max=1e-2,
+        update=_mark_quality_custom,
+    )
+    scene.airt_air_enable = bpy.props.BoolProperty(
+        name="Air Absorption",
+        default=True,
+    )
+    scene.airt_air_temp_c = bpy.props.FloatProperty(
+        name="Temperature",
+        default=20.0,
+        min=-30.0,
+        max=50.0,
+    )
+    scene.airt_air_humidity = bpy.props.FloatProperty(
+        name="Relative Humidity",
+        default=50.0,
+        min=0.0,
+        max=100.0,
+        subtype='PERCENTAGE',
+    )
+    scene.airt_air_pressure_kpa = bpy.props.FloatProperty(
+        name="Pressure",
+        default=101.325,
+        min=80.0,
+        max=110.0,
+    )
+    scene.airt_enable_diffraction = bpy.props.BoolProperty(
+        name="Edge Diffraction",
+        description="Add the bounded single-edge shadow approximation",
+        default=False,
+    )
+    scene.airt_diffraction_samples = bpy.props.IntProperty(
+        name="Maximum Edge Paths",
+        default=4,
+        min=1,
+        max=32,
+    )
+    scene.airt_diffraction_max_deg = bpy.props.FloatProperty(
+        name="Maximum Bend Angle",
+        default=45.0,
+        min=1.0,
+        max=90.0,
+    )
+    scene.airt_yaw_offset_deg = bpy.props.FloatProperty(
+        name="Ambisonic Yaw",
+        default=0.0,
+        min=-180.0,
+        max=180.0,
+    )
+    scene.airt_invert_z = bpy.props.BoolProperty(
+        name="Flip Ambisonic Z",
+        default=False,
+    )
+    scene.airt_output_path = bpy.props.StringProperty(
+        name="Output WAV",
+        description="Destination for the 16-channel ACN/SN3D impulse response",
+        default="//ambisonic_ir.wav",
+        subtype='FILE_PATH',
+    )
+    scene.airt_wav_subtype = bpy.props.EnumProperty(
+        name="WAV Format",
+        items=[
+            ('FLOAT', '32-bit Float', 'Recommended for convolution impulse responses'),
+            ('PCM_24', '24-bit PCM', 'Integer output with less headroom'),
+        ],
+        default='FLOAT',
+    )
+    scene.airt_normalization = bpy.props.EnumProperty(
+        name="Output Level",
+        items=[
+            ('PEAK', 'Normalize Peak', 'Normalize to the selected peak level'),
+            ('PRESERVE', 'Preserve Relative Level', 'Keep the renderer\'s 1/r reference level'),
+        ],
+        default='PEAK',
+    )
+    scene.airt_peak_db = bpy.props.FloatProperty(
+        name="Normalized Peak",
+        default=-1.0,
+        min=-24.0,
+        max=0.0,
+    )
+    scene.airt_last_render_summary = bpy.props.StringProperty(
+        name="Last Render",
+        default="",
     )
 
 
 def unregister_acoustic_props():
-    """Unregister all acoustic properties."""
-    # Object properties
-    object_attrs = [
-        "absorption",
-        "absorption_bands", 
-        "scatter",
-        "scatter_bands",
-        "transmission",
-        "is_acoustic_source",
-        "is_acoustic_receiver",
-        "airt_material_preset",
-        "show_frequency_details"
-    ]
-    
-    for attr in object_attrs:
-        if hasattr(bpy.types.Object, attr):
-            delattr(bpy.types.Object, attr)
-    
-    # Scene properties  
-    scene_attrs = [
-        "airt_num_rays", "airt_passes", "airt_max_order", "airt_sr", "airt_ir_seconds",
-        "airt_angle_tol_deg", "airt_wav_subtype", "airt_output_content", "airt_seed", "airt_recv_radius",
-        "airt_trace_mode", "airt_hybrid_forward_gain_db", "airt_hybrid_reverse_gain_db", "airt_hybrid_crossfade_start_ms", "airt_hybrid_crossfade_length_ms", "airt_hybrid_forward_final_level", "airt_hybrid_reverse_final_level",
-        "airt_hybrid_cache_valid", "airt_hybrid_cache_forward_ir", "airt_hybrid_cache_reverse_ir", "airt_hybrid_cache_sample_rate", "airt_hybrid_cache_ir_length", "airt_hybrid_cache_channels", "airt_hybrid_cache_scene_hash", "airt_hybrid_last_export_path",
-        "airt_rr_enable", "airt_rr_start", "airt_rr_p",
-        "airt_spec_rough_deg", "airt_enable_seg_capture", "airt_enable_diffraction",
-        "airt_diffraction_samples", "airt_diffraction_max_deg",
-        "airt_yaw_offset_deg", "airt_invert_z", "airt_calibrate_direct",
-        "airt_air_enable", "airt_air_temp_c", "airt_air_humidity", "airt_air_pressure_kpa",
-        "airt_quick_broadband", "airt_min_throughput"
-    ]
-    
-    for attr in scene_attrs:
-        if hasattr(bpy.types.Scene, attr):
-            delattr(bpy.types.Scene, attr)
+    object_names = (
+        'airt_material_preset', 'absorption', 'absorption_bands', 'scatter',
+        'scatter_bands', 'transmission', 'transmission_bands',
+        'is_acoustic_source', 'is_acoustic_receiver', 'show_frequency_details',
+    )
+    scene_names = (
+        'airt_source_object', 'airt_receiver_object', 'airt_quality_preset',
+        'airt_num_rays', 'airt_max_order', 'airt_sr', 'airt_ir_seconds',
+        'airt_output_content', 'airt_early_reflections', 'airt_early_gain_db',
+        'airt_diffuse_gain_db', 'airt_seed', 'airt_spec_rough_deg',
+        'airt_rr_enable', 'airt_rr_start', 'airt_rr_p', 'airt_min_throughput',
+        'airt_air_enable', 'airt_air_temp_c', 'airt_air_humidity',
+        'airt_air_pressure_kpa', 'airt_enable_diffraction',
+        'airt_diffraction_samples', 'airt_diffraction_max_deg',
+        'airt_yaw_offset_deg', 'airt_invert_z', 'airt_output_path',
+        'airt_wav_subtype', 'airt_normalization', 'airt_peak_db',
+        'airt_last_render_summary',
+    )
+    for name in object_names:
+        if hasattr(bpy.types.Object, name):
+            delattr(bpy.types.Object, name)
+    for name in scene_names:
+        if hasattr(bpy.types.Scene, name):
+            delattr(bpy.types.Scene, name)

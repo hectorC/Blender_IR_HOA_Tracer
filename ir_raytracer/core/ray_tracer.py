@@ -1,1003 +1,667 @@
-# -*- coding: utf-8 -*-
-"""
-Ray tracing engine for acoustic impulse response rendering.
-"""
+"""Receiver-centric acoustic energy transport and ambisonic IR rendering."""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from math import acos, cos, exp, pi, sin, sqrt
+from typing import Callable, List, Optional, Tuple
+
 import mathutils
 import numpy as np
-from math import pi, cos, exp, acos
-import random
-from typing import List, Tuple, Optional, Any
-from abc import ABC, abstractmethod
 
 from .acoustics import (
-    MaterialProperties, air_attenuation_bands,
-    add_filtered_impulse as synthesize_filtered_impulse,
-    NUM_BANDS
+    MaterialProperties,
+    NUM_BANDS,
+    air_attenuation_bands,
 )
 from .ambisonic import AmbisonicEncoder
-from .diffraction import find_diffraction_paths, maekawa_diffraction_gains
-from ..utils.math_utils import (
-    reflect, cosine_weighted_hemisphere, jitter_specular_direction,
-    segment_hits_sphere, generate_ray_directions
+from .diffraction import (
+    build_diffraction_edge_index,
+    find_diffraction_paths,
+    maekawa_diffraction_gains,
 )
-from ..utils.scene_utils import speed_of_sound_bu, get_scene_unit_scale
+from .synthesis import AcousticEvent, SynthesisStats, synthesize_ambisonic_ir
+from ..utils.math_utils import reflect
+from ..utils.scene_utils import (
+    AcousticScene,
+    build_acoustic_scene,
+    get_scene_unit_scale,
+    point_in_face,
+    spectral_visibility,
+    speed_of_sound_bu,
+)
 
 
-class RayTracingConfig:
-    """Configuration for ray tracing parameters."""
-    
-    def __init__(self, context, diffraction_edge_index=None):
-        """Initialize from Blender scene context."""
+@dataclass
+class AcousticRenderConfig:
+    """Immutable settings used by one acoustic render."""
+
+    ray_count: int
+    max_bounces: int
+    sample_rate: int
+    duration_seconds: float
+    output_content: str
+    early_reflections: bool
+    seed: int
+    min_energy: float
+    rr_enabled: bool
+    rr_start: int
+    rr_survival: float
+    specular_roughness_rad: float
+    unit_scale: float
+    speed_of_sound_bu: float
+    air_enabled: bool
+    air_temperature_c: float
+    air_humidity_pct: float
+    air_pressure_kpa: float
+    diffraction_enabled: bool
+    diffraction_paths: int
+    diffraction_max_angle_rad: float
+    early_gain_db: float
+    diffuse_gain_db: float
+    encoder: AmbisonicEncoder
+    eps: float = 1e-4
+
+    @classmethod
+    def from_context(cls, context) -> "AcousticRenderConfig":
         scene = context.scene
-        
-        # Basic parameters
-        self.num_rays = max(1, int(scene.airt_num_rays))
-        self.max_bounces = int(scene.airt_max_order)
-        self.sample_rate = int(scene.airt_sr)
-        self.ir_length_samples = int(scene.airt_ir_seconds * self.sample_rate)
-        
-        # Physical parameters
-        self.speed_of_sound = speed_of_sound_bu(context)
-        self.unit_scale = get_scene_unit_scale(context)
-        self.receiver_radius_m = max(1e-6, float(scene.airt_recv_radius))
-        self.receiver_radius = self.receiver_radius_m / max(self.unit_scale, 1e-9)
-        
-        # Tracing behavior
-        self.angle_tolerance_rad = scene.airt_angle_tol_deg * pi / 180.0
-        self.specular_roughness_rad = max(0.0, float(scene.airt_spec_rough_deg)) * pi / 180.0
-        self.segment_capture = bool(scene.airt_enable_seg_capture)
-        
-        # Russian roulette
-        self.rr_enable = bool(scene.airt_rr_enable)
-        self.rr_start_bounce = int(scene.airt_rr_start)
-        self.rr_survive_prob = max(0.05, min(1.0, float(scene.airt_rr_p)))
-        
-        # Diffraction
-        self.enable_diffraction = bool(getattr(scene, 'airt_enable_diffraction', False))
-        self.diffraction_samples = int(getattr(scene, 'airt_diffraction_samples', 0))
-        self.diffraction_max_angle = max(0.0, float(getattr(scene, 'airt_diffraction_max_deg', 40.0))) * pi / 180.0
-        self.include_primary_diffraction = True
-        self.diffraction_edge_index = diffraction_edge_index
-        if self.enable_diffraction and self.diffraction_samples > 0:
-            try:
-                if self.diffraction_edge_index is None:
-                    from .diffraction import build_diffraction_edge_index
-                    self.diffraction_edge_index = build_diffraction_edge_index(context)
-                print(
-                    "Diffraction: indexed "
-                    f"{len(self.diffraction_edge_index.edges)} sharp/boundary edges"
-                )
-            except Exception as error:
-                print(f"Diffraction: edge indexing disabled ({error})")
-        
-        # Air absorption
-        self.air_enable = bool(getattr(scene, 'airt_air_enable', True))
-        self.air_temp_c = float(getattr(scene, 'airt_air_temp_c', 20.0))
-        self.air_humidity = float(getattr(scene, 'airt_air_humidity', 50.0))
-        self.air_pressure_kpa = float(getattr(scene, 'airt_air_pressure_kpa', 101.325))
-        
-        # Output options
         output_content = getattr(scene, 'airt_output_content', 'FULL')
-        self.output_content = output_content if output_content in {'FULL', 'REVERB_ONLY'} else 'FULL'
-        self.include_direct = self.output_content == 'FULL'
-        self.quick_broadband = bool(getattr(scene, 'airt_quick_broadband', False))
-        self.min_throughput = float(getattr(scene, 'airt_min_throughput', 1e-4))
-        
-        # Orientation
-        yaw_offset = float(getattr(scene, 'airt_yaw_offset_deg', 0.0))
-        invert_z = bool(getattr(scene, 'airt_invert_z', False))
-        self.ambisonic_encoder = AmbisonicEncoder(yaw_offset, invert_z)
-        
-        # Derived constants
-        self.eps = 1e-4
-        self.pi4 = 4.0 * pi
-        
-        # HYBRID BLEND CONTROLS - Advanced user balance settings
-        # Forward Tracer Gain: -24dB to +24dB (discrete echoes, tunnel reflections)
-        self.hybrid_forward_gain_db = float(getattr(scene, 'airt_hybrid_forward_gain_db', 0.0))
-        self.hybrid_forward_gain_db = max(-24.0, min(24.0, self.hybrid_forward_gain_db))
-        
-        # Reverse Tracer Gain: -24dB to +24dB (diffuse reverb tail)
-        self.hybrid_reverse_gain_db = float(getattr(scene, 'airt_hybrid_reverse_gain_db', 0.0))
-        self.hybrid_reverse_gain_db = max(-24.0, min(24.0, self.hybrid_reverse_gain_db))
-        
-        # Late Reverb Ramp: 0.05s to 0.5s (how quickly reverse reverb builds up)
-        self.hybrid_reverb_ramp_time = float(getattr(scene, 'airt_hybrid_reverb_ramp_time', 0.2))
-        self.hybrid_reverb_ramp_time = max(0.05, min(0.5, self.hybrid_reverb_ramp_time))
-        
-        # Convert dB to linear gain factors
-        self.hybrid_forward_gain_linear = 10.0 ** (self.hybrid_forward_gain_db / 20.0)
-        self.hybrid_reverse_gain_linear = 10.0 ** (self.hybrid_reverse_gain_db / 20.0)
+        if output_content not in {'FULL', 'REFLECTIONS', 'DIFFUSE'}:
+            output_content = 'FULL'
+        return cls(
+            ray_count=max(1, int(getattr(scene, 'airt_num_rays', 1024))),
+            max_bounces=max(0, int(getattr(scene, 'airt_max_order', 32))),
+            sample_rate=max(8000, int(getattr(scene, 'airt_sr', 48000))),
+            duration_seconds=max(0.1, float(getattr(scene, 'airt_ir_seconds', 2.0))),
+            output_content=output_content,
+            early_reflections=bool(getattr(scene, 'airt_early_reflections', True)),
+            seed=int(getattr(scene, 'airt_seed', 1)),
+            min_energy=max(1e-12, float(getattr(scene, 'airt_min_throughput', 1e-6))),
+            rr_enabled=bool(getattr(scene, 'airt_rr_enable', True)),
+            rr_start=max(0, int(getattr(scene, 'airt_rr_start', 20))),
+            rr_survival=float(np.clip(getattr(scene, 'airt_rr_p', 0.97), 0.05, 1.0)),
+            specular_roughness_rad=max(
+                0.0, float(getattr(scene, 'airt_spec_rough_deg', 8.0)) * pi / 180.0
+            ),
+            unit_scale=get_scene_unit_scale(context),
+            speed_of_sound_bu=speed_of_sound_bu(context),
+            air_enabled=bool(getattr(scene, 'airt_air_enable', True)),
+            air_temperature_c=float(getattr(scene, 'airt_air_temp_c', 20.0)),
+            air_humidity_pct=float(getattr(scene, 'airt_air_humidity', 50.0)),
+            air_pressure_kpa=float(getattr(scene, 'airt_air_pressure_kpa', 101.325)),
+            diffraction_enabled=bool(getattr(scene, 'airt_enable_diffraction', False)),
+            diffraction_paths=max(0, int(getattr(scene, 'airt_diffraction_samples', 4))),
+            diffraction_max_angle_rad=max(
+                0.0,
+                float(getattr(scene, 'airt_diffraction_max_deg', 45.0)) * pi / 180.0,
+            ),
+            early_gain_db=float(getattr(scene, 'airt_early_gain_db', 0.0)),
+            diffuse_gain_db=float(getattr(scene, 'airt_diffuse_gain_db', 0.0)),
+            encoder=AmbisonicEncoder(
+                float(getattr(scene, 'airt_yaw_offset_deg', 0.0)),
+                bool(getattr(scene, 'airt_invert_z', False)),
+            ),
+        )
 
 
-class ImpulseResponseRenderer:
-    """Base class for impulse response rendering."""
-    
-    def __init__(self, config: RayTracingConfig):
-        """Initialize renderer with configuration."""
+@dataclass
+class TransportStats:
+    rays_traced: int = 0
+    surface_interactions: int = 0
+    source_connections: int = 0
+    direct_events: int = 0
+    early_events: int = 0
+    diffraction_events: int = 0
+
+
+@dataclass
+class AcousticRenderResult:
+    ir: np.ndarray
+    events: List[AcousticEvent]
+    transport: TransportStats
+    synthesis: SynthesisStats
+
+
+class ReceiverPathTracer:
+    """Trace time-resolved acoustic energy from the listener toward the source."""
+
+    def __init__(self, config: AcousticRenderConfig, acoustic_scene: AcousticScene):
         self.config = config
-        self.ir = np.zeros((16, config.ir_length_samples), dtype=np.float32)
-        self.wrote_any = False
-    
-    def _cast_ray(self, pos: mathutils.Vector, direction: mathutils.Vector, bvh):
-        """Cast a ray and return hit information."""
-        hit, normal, index, dist = bvh.ray_cast(pos + direction * self.config.eps, direction)
-        
-        if hit is None or index is None:
-            return False, None, None, None
-            
-        hit_point = mathutils.Vector(hit)
-        normal = mathutils.Vector(normal)
-        if normal.dot(direction) > 0.0:
-            normal = -normal
-            
-        return True, hit_point, normal, index
-    
-    def _get_material_properties(self, face_index: int, obj_map: List[Any]):
-        """Get material properties for a face."""
-        from ..core.acoustics import MaterialProperties
-        
-        hit_obj = obj_map[face_index] if 0 <= face_index < len(obj_map) else None
-        return MaterialProperties(hit_obj)
-    
-    def _calculate_air_absorption(self, distance: float) -> np.ndarray:
-        """Calculate air absorption for a given distance."""
-        from ..core.acoustics import air_attenuation_bands, NUM_BANDS
-        
-        return air_attenuation_bands(
-            distance * self.config.unit_scale,  # Convert to meters
-            self.config.air_temp_c,
-            self.config.air_humidity,
-            self.config.air_pressure_kpa
-        )
-    
-    def _should_terminate_ray(self, bounce: int, throughput: np.ndarray) -> bool:
-        """Check if ray should be terminated using Russian Roulette."""
-        if not self.config.rr_enable:
-            return False
-            
-        if bounce < self.config.rr_start_bounce:
-            return False
-            
-        # Russian roulette
-        import random
-        if random.random() > self.config.rr_survive_prob:
-            return True
-            
-        # Continue with boosted throughput
-        return False
-    
-    def add_impulse_simple(self, ambi_vec: np.ndarray, delay_samples: float, amplitude: float):
-        """Add a simple impulse to the IR."""
-        n = int(np.floor(delay_samples))
-        frac = float(delay_samples - n)
-        
-        if 0 <= n < self.ir.shape[1]:
-            self.ir[:, n] += ambi_vec * amplitude * (1.0 - frac)
-        if 0 <= n + 1 < self.ir.shape[1]:
-            self.ir[:, n + 1] += ambi_vec * amplitude * frac
-    
-    def add_filtered_impulse(self, ambi_vec: np.ndarray, delay_samples: float, 
-                           amplitude: float, band_profile: np.ndarray) -> bool:
-        """Add a frequency-filtered impulse to the IR."""
-        return synthesize_filtered_impulse(
-            self.ir,
-            ambi_vec,
-            delay_samples,
-            amplitude,
-            band_profile,
-            self.config.sample_rate,
-        )
-    
-    def get_path_band_profile(self, band_amplitude: np.ndarray, distance_bu: float) -> np.ndarray:
-        """Calculate frequency-dependent path attenuation."""
-        if not self.config.air_enable:
-            return np.array(band_amplitude, dtype=np.float32)
-        
-        distance_m = distance_bu * self.config.unit_scale
-        air_attenuation = air_attenuation_bands(
-            distance_m, self.config.air_temp_c, 
-            self.config.air_humidity, self.config.air_pressure_kpa
-        )
-        
-        profile = np.array(band_amplitude, dtype=np.float32) * air_attenuation
-        return np.clip(profile, 0.0, 1e6)
-    
-    def emit_impulse(self, band_amplitude: np.ndarray, distance_bu: float, 
-                    incoming_direction: mathutils.Vector, amplitude_scalar: float) -> bool:
-        """Emit an impulse into the impulse response."""
-        if distance_bu <= 0.0:
-            return False
-        
-        band_profile = self.get_path_band_profile(band_amplitude, distance_bu)
-        
-        # Quick mode: use broadband average
-        if self.config.quick_broadband:
-            gain = float(np.mean(band_profile))
-            if gain <= 1e-8:
-                return False
-            
-            delay = (distance_bu / self.config.speed_of_sound) * self.config.sample_rate
-            ambi = self.config.ambisonic_encoder.encode_with_nf_compensation(
-                incoming_direction, distance_bu * self.config.unit_scale, 
-                self.config.receiver_radius_m
-            )
-            
-            if not np.any(np.abs(ambi) > 1e-8):
-                ambi = np.zeros(16, dtype=np.float32)
-                ambi[0] = 1.0
-            
-            self.add_impulse_simple(ambi, delay, amplitude_scalar * gain)
-            return True
-        
-        # Full frequency-dependent processing
-        if not np.any(band_profile > 1e-8):
-            return False
-        
-        delay = (distance_bu / self.config.speed_of_sound) * self.config.sample_rate
-        ambi = self.config.ambisonic_encoder.encode_with_nf_compensation(
-            incoming_direction, distance_bu * self.config.unit_scale,
-            self.config.receiver_radius_m
-        )
-        
-        if not np.any(np.abs(ambi) > 1e-8):
-            ambi = np.zeros(16, dtype=np.float32)
-            ambi[0] = 1.0
-        
-        wrote = self.add_filtered_impulse(ambi, delay, amplitude_scalar, band_profile)
-        if not wrote:
-            self.add_impulse_simple(ambi, delay, amplitude_scalar)
-            wrote = True
-        
-        return wrote
-    
-    def _apply_russian_roulette(self, bounce: int, throughput: np.ndarray):
-        """Apply Russian Roulette with proper energy compensation.
-        
-        Returns:
-            (should_terminate, compensated_throughput)
-        """
-        import random
-        
-        # Throughput check
-        if float(np.max(throughput)) < self.config.min_throughput:
-            return True, throughput
-        
-        # Russian roulette with energy compensation
-        if self.config.rr_enable and bounce >= self.config.rr_start_bounce:
-            if random.random() > self.config.rr_survive_prob:
-                return True, throughput  # Terminate
-            else:
-                # Boost throughput to compensate for survival probability
-                compensated_throughput = throughput / self.config.rr_survive_prob
-                return False, compensated_throughput
-        
-        return False, throughput
+        self.scene = acoustic_scene
+        self.stats = TransportStats()
+        self.rng = np.random.default_rng(config.seed if config.seed != 0 else None)
+        self._material_cache = {}
 
-    def _geometric_spreading(self, distance_bu: float) -> float:
-        """Return pressure-domain 1/r spreading using scene units in metres."""
-        distance_m = max(0.0, float(distance_bu)) * self.config.unit_scale
-        return 1.0 / max(distance_m, self.config.receiver_radius_m)
+    def material_for_face(self, face_index: int) -> MaterialProperties:
+        """Return one immutable coefficient snapshot per acoustic object."""
+        obj = self.scene.faces[face_index].object_ref
+        key = id(obj)
+        material = self._material_cache.get(key)
+        if material is None:
+            material = MaterialProperties(obj)
+            self._material_cache[key] = material
+        return material
 
-    def _reflection_connection_profile(
+    def _air_energy(self, distance_bu: float) -> np.ndarray:
+        if not self.config.air_enabled:
+            return np.ones(NUM_BANDS, dtype=np.float32)
+        pressure_gain = air_attenuation_bands(
+            distance_bu * self.config.unit_scale,
+            self.config.air_temperature_c,
+            self.config.air_humidity_pct,
+            self.config.air_pressure_kpa,
+        )
+        return pressure_gain * pressure_gain
+
+    def _directions(self) -> List[mathutils.Vector]:
+        count = self.config.ray_count
+        golden_angle = pi * (3.0 - sqrt(5.0))
+        phase = float(self.rng.uniform(0.0, 2.0 * pi))
+        axis_values = self.rng.normal(size=3)
+        axis_length = float(np.linalg.norm(axis_values))
+        axis = mathutils.Vector(
+            tuple(axis_values / axis_length)
+            if axis_length > 1e-12
+            else (0.0, 0.0, 1.0)
+        )
+        rotation = mathutils.Quaternion(axis, float(self.rng.uniform(0.0, 2.0 * pi)))
+        directions = []
+        for index in range(count):
+            z = 1.0 - 2.0 * (index + 0.5) / count
+            radius = sqrt(max(0.0, 1.0 - z * z))
+            angle = golden_angle * index + phase
+            direction = mathutils.Vector((radius * cos(angle), radius * sin(angle), z))
+            directions.append((rotation @ direction).normalized())
+        return directions
+
+    def _roughness_exponent(self) -> float:
+        sigma = self.config.specular_roughness_rad
+        if sigma <= 1e-4:
+            return 10000.0
+        return float(np.clip(2.0 / (sigma * sigma) - 2.0, 1.0, 10000.0))
+
+    def _connection_brdf(
         self,
-        direction: mathutils.Vector,
-        normal: mathutils.Vector,
-        outgoing: mathutils.Vector,
         material: MaterialProperties,
+        normal: mathutils.Vector,
+        source_direction: mathutils.Vector,
+        receiver_direction: mathutils.Vector,
+        include_specular: bool,
     ) -> np.ndarray:
-        """Evaluate the frequency-dependent reflection lobe for a point connection."""
-        specular_direction = reflect(direction, normal)
-        cos_angle = float(np.clip(specular_direction.dot(outgoing), -1.0, 1.0))
-        angle_difference = acos(cos_angle)
-        specular_lobe = exp(
-            -(angle_difference / max(self.config.angle_tolerance_rad, 1e-6)) ** 2
-        )
-        diffuse_lobe = max(0.0, float(outgoing.dot(normal))) / pi
-        lobe_energy = np.clip(
-            material.specular_fraction * specular_lobe
-            + material.diffuse_fraction * diffuse_lobe,
-            0.0,
-            1.0,
-        )
-        return material.reflection_amplitude * np.sqrt(lobe_energy)
+        diffuse_energy = material.reflection_spectrum * material.diffuse_fraction
+        brdf = diffuse_energy / pi
+        if not include_specular:
+            return brdf
 
-    def _sample_surface_scatter(
+        specular_energy = material.reflection_spectrum * material.specular_fraction
+        mirror_direction = reflect(-source_direction, normal)
+        alignment = max(0.0, float(mirror_direction.dot(receiver_direction)))
+        if alignment <= 0.0:
+            return brdf
+        exponent = self._roughness_exponent()
+        phong = (exponent + 2.0) / (2.0 * pi) * alignment ** exponent
+        return brdf + specular_energy * phong
+
+    def _sample_cosine_hemisphere(self, normal: mathutils.Vector) -> mathutils.Vector:
+        first = float(self.rng.random())
+        second = float(self.rng.random())
+        radius = sqrt(first)
+        phi = 2.0 * pi * second
+        local = mathutils.Vector((radius * cos(phi), radius * sin(phi), sqrt(1.0 - first)))
+        helper = (
+            mathutils.Vector((1.0, 0.0, 0.0))
+            if abs(normal.x) < 0.8
+            else mathutils.Vector((0.0, 1.0, 0.0))
+        )
+        tangent = normal.cross(helper).normalized()
+        bitangent = normal.cross(tangent).normalized()
+        return (tangent * local.x + bitangent * local.y + normal * local.z).normalized()
+
+    def _sample_specular_lobe(
+        self, incoming: mathutils.Vector, normal: mathutils.Vector
+    ) -> mathutils.Vector:
+        mirror = reflect(incoming, normal)
+        exponent = self._roughness_exponent()
+        cos_theta = float(self.rng.random()) ** (1.0 / (exponent + 1.0))
+        sin_theta = sqrt(max(0.0, 1.0 - cos_theta * cos_theta))
+        phi = 2.0 * pi * float(self.rng.random())
+        helper = (
+            mathutils.Vector((1.0, 0.0, 0.0))
+            if abs(mirror.x) < 0.8
+            else mathutils.Vector((0.0, 1.0, 0.0))
+        )
+        tangent = mirror.cross(helper).normalized()
+        bitangent = mirror.cross(tangent).normalized()
+        sampled = (
+            mirror * cos_theta
+            + tangent * (sin_theta * cos(phi))
+            + bitangent * (sin_theta * sin(phi))
+        ).normalized()
+        return sampled if sampled.dot(normal) > 1e-6 else mirror
+
+    def _sample_surface(
         self,
         direction: mathutils.Vector,
         normal: mathutils.Vector,
         material: MaterialProperties,
         throughput: np.ndarray,
-    ) -> Tuple[Optional[mathutils.Vector], Optional[np.ndarray]]:
-        """Sample one outgoing component with Monte Carlo branch compensation.
+    ) -> Tuple[Optional[mathutils.Vector], Optional[np.ndarray], bool]:
+        transmission = material.transmission_spectrum
+        diffuse = material.reflection_spectrum * material.diffuse_fraction
+        specular = material.reflection_spectrum * material.specular_fraction
+        components = np.stack((transmission, diffuse, specular)).astype(np.float64)
+        active = np.maximum(np.asarray(throughput, dtype=np.float64), 0.0)
+        active_peak = float(np.max(active))
+        if active_peak <= 1e-20:
+            return None, None, False
 
-        Branch probabilities follow mean outgoing energy. Dividing each sampled
-        pressure coefficient by its probability keeps the expected contribution
-        independent of the material's specular/diffuse/transmission split.
-        """
-        transmission_energy = float(np.mean(material.transmission_spectrum))
-        diffuse_energy = float(np.mean(
-            material.reflection_spectrum * material.diffuse_fraction
-        ))
-        specular_energy = float(np.mean(
-            material.reflection_spectrum * material.specular_fraction
-        ))
-        total_energy = transmission_energy + diffuse_energy + specular_energy
-        if total_energy <= 1e-12:
-            return None, None
+        # Continue according to the strongest still-relevant frequency band,
+        # then importance-sample the interaction type. A simple band average
+        # is unbiased but can discard nearly all low-frequency paths for a
+        # material such as carpet; this max-band strategy greatly reduces that
+        # spectral-tail variance while retaining coefficient/probability
+        # compensation below.
+        importance = active / active_peak
+        surviving = np.sum(components, axis=0)
+        survival_probability = float(np.clip(np.max(importance * surviving), 0.0, 1.0))
+        metrics = np.max(components * importance[None, :], axis=1)
+        metric_sum = float(np.sum(metrics))
+        if survival_probability <= 1e-12 or metric_sum <= 1e-12:
+            return None, None, False
+        probabilities = survival_probability * metrics / metric_sum
+        total_probability = float(np.sum(probabilities))
+        draw = float(self.rng.random())
+        if draw >= total_probability:
+            return None, None, False
 
-        probabilities = np.array(
-            (transmission_energy, diffuse_energy, specular_energy),
-            dtype=np.float64,
-        ) / total_energy
-        branch = float(random.random())
-
-        if branch < probabilities[0]:
-            probability = float(probabilities[0])
+        if draw < probabilities[0]:
+            probability = max(float(probabilities[0]), 1e-12)
+            return direction.normalized(), throughput * transmission / probability, True
+        draw -= probabilities[0]
+        if draw < probabilities[1]:
+            probability = max(float(probabilities[1]), 1e-12)
             return (
-                direction.normalized(),
-                throughput * material.transmission_amplitude / probability,
+                self._sample_cosine_hemisphere(normal),
+                throughput * diffuse / probability,
+                False,
             )
-
-        branch -= probabilities[0]
-        if branch < probabilities[1]:
-            probability = float(probabilities[1])
-            return (
-                cosine_weighted_hemisphere(normal),
-                throughput * material.diffuse_amplitude / probability,
-            )
-
-        probability = float(probabilities[2])
-        if probability <= 1e-12:
-            return None, None
-        specular_direction = reflect(direction, normal)
+        probability = max(float(probabilities[2]), 1e-12)
         return (
-            jitter_specular_direction(
-                specular_direction, self.config.specular_roughness_rad
-            ),
-            throughput * material.specular_amplitude / probability,
+            self._sample_specular_lobe(direction, normal),
+            throughput * specular / probability,
+            False,
         )
 
-    def _find_diffraction_paths(
+    def _source_connection(
         self,
-        origin: mathutils.Vector,
-        receiver: mathutils.Vector,
-        bvh,
-    ):
-        edge_index = getattr(self.config, 'diffraction_edge_index', None)
-        if (
-            not self.config.enable_diffraction
-            or self.config.diffraction_samples <= 0
-            or edge_index is None
-        ):
-            return []
-        return find_diffraction_paths(
-            origin,
-            receiver,
-            edge_index,
-            bvh,
-            self.config.unit_scale,
-            self.config.diffraction_max_angle,
-            self.config.diffraction_samples,
+        hit_point: mathutils.Vector,
+        normal: mathutils.Vector,
+        reverse_direction: mathutils.Vector,
+        source: mathutils.Vector,
+        path_distance_bu: float,
+        throughput: np.ndarray,
+        material: MaterialProperties,
+        first_direction: mathutils.Vector,
+        bounce: int,
+    ) -> Optional[AcousticEvent]:
+        to_source = source - hit_point
+        source_distance_bu = to_source.length
+        if source_distance_bu <= self.config.eps:
+            return None
+        source_direction = to_source / source_distance_bu
+        cosine_incident = max(0.0, float(normal.dot(source_direction)))
+        if cosine_incident <= 1e-8:
+            return None
+
+        visibility = spectral_visibility(
+            hit_point + normal * (self.config.eps * 4.0),
+            source,
+            self.scene,
             self.config.eps,
         )
+        if not np.any(visibility > 1e-10):
+            return None
 
-    def _emit_primary_diffraction(
+        brdf = self._connection_brdf(
+            material,
+            normal,
+            source_direction,
+            -reverse_direction,
+            include_specular=not (bounce == 0 and self.config.early_reflections),
+        )
+        if not np.any(brdf > 1e-12):
+            return None
+
+        source_distance_m = max(
+            source_distance_bu * self.config.unit_scale, self.config.eps
+        )
+        total_distance_bu = path_distance_bu + source_distance_bu
+        angular_sample_weight = 4.0 * pi / float(self.config.ray_count)
+        energy = (
+            throughput
+            * visibility
+            * brdf
+            * cosine_incident
+            * angular_sample_weight
+            / (source_distance_m * source_distance_m)
+            * self._air_energy(total_distance_bu)
+        )
+        if not np.any(energy > 1e-16):
+            return None
+        self.stats.source_connections += 1
+        return AcousticEvent(
+            delay_seconds=total_distance_bu / self.config.speed_of_sound_bu,
+            arrival_direction=first_direction.copy(),
+            energy_bands=energy.astype(np.float32),
+            kind='DIFFUSE',
+            order=bounce + 1,
+        )
+
+    def trace(
         self,
-        origin: mathutils.Vector,
+        source: mathutils.Vector,
         receiver: mathutils.Vector,
-        bvh,
-        throughput: np.ndarray,
-    ) -> bool:
-        """Emit source/receiver shadow paths around visible scene edges."""
-        paths = self._find_diffraction_paths(origin, receiver, bvh)
-        if not paths:
-            return False
+        progress: Optional[Callable[[int, int], None]] = None,
+    ) -> List[AcousticEvent]:
+        events: List[AcousticEvent] = []
+        bvh = self.scene.bvh
+        if bvh is None or self.config.max_bounces <= 0:
+            return events
 
-        wrote = False
-        path_weight = 1.0 / float(len(paths))
-        speed_of_sound_ms = self.config.speed_of_sound * self.config.unit_scale
-        for path in paths:
-            gains = maekawa_diffraction_gains(
-                path.path_difference_m,
-                speed_of_sound_ms,
-                path.bend_angle_rad,
-                self.config.diffraction_max_angle,
-            )
-            incoming = (path.point - receiver).normalized()
-            if self.emit_impulse(
-                throughput * gains * path_weight,
-                path.distance_bu,
-                incoming,
-                self._geometric_spreading(path.distance_bu),
-            ):
-                wrote = True
-        self.wrote_any = self.wrote_any or wrote
-        return wrote
+        for ray_index, initial_direction in enumerate(self._directions()):
+            if progress and ray_index % 64 == 0:
+                progress(ray_index, self.config.ray_count)
+            self.stats.rays_traced += 1
+            first_direction = initial_direction.copy()
+            direction = initial_direction.copy()
+            position = receiver.copy()
+            throughput = np.ones(NUM_BANDS, dtype=np.float64)
+            path_distance_bu = 0.0
+
+            for bounce in range(self.config.max_bounces):
+                hit, normal, face_index, hit_distance = bvh.ray_cast(
+                    position + direction * self.config.eps, direction
+                )
+                if hit is None or normal is None or face_index is None:
+                    break
+                if not (0 <= face_index < len(self.scene.faces)):
+                    break
+
+                hit_point = mathutils.Vector(hit)
+                normal = mathutils.Vector(normal).normalized()
+                if normal.dot(direction) > 0.0:
+                    normal = -normal
+                path_distance_bu += float(hit_distance)
+                if path_distance_bu / self.config.speed_of_sound_bu >= self.config.duration_seconds:
+                    break
+
+                self.stats.surface_interactions += 1
+                material = self.material_for_face(face_index)
+                event = self._source_connection(
+                    hit_point,
+                    normal,
+                    direction,
+                    source,
+                    path_distance_bu,
+                    throughput,
+                    material,
+                    first_direction,
+                    bounce,
+                )
+                if event is not None and event.delay_seconds < self.config.duration_seconds:
+                    events.append(event)
+
+                new_direction, new_throughput, transmitted = self._sample_surface(
+                    direction, normal, material, throughput
+                )
+                if new_direction is None or new_throughput is None:
+                    break
+                throughput = new_throughput
+                if float(np.max(throughput)) < self.config.min_energy:
+                    break
+
+                if self.config.rr_enabled and bounce + 1 >= self.config.rr_start:
+                    if float(self.rng.random()) > self.config.rr_survival:
+                        break
+                    throughput /= self.config.rr_survival
+
+                direction = new_direction.normalized()
+                if transmitted:
+                    position = hit_point + direction * (self.config.eps * 4.0)
+                else:
+                    position = (
+                        hit_point
+                        + normal * (self.config.eps * 2.0)
+                        + direction * (self.config.eps * 2.0)
+                    )
+
+        if progress:
+            progress(self.config.ray_count, self.config.ray_count)
+        return events
 
 
-class ForwardRayTracer(ImpulseResponseRenderer):
-    """Forward ray tracer (source to receiver)."""
-    
-    def __init__(self, config: RayTracingConfig):
-        """Initialize forward ray tracer."""
-        super().__init__(config)
-    
-    def trace_rays(self, source: mathutils.Vector, receiver: mathutils.Vector,
-                   bvh, obj_map: List[Any], directions: List[Tuple[float, float, float]]) -> np.ndarray:
-        """Trace rays from source towards receiver."""
-        if bvh is None:
-            return self.ir
-        
-        num_dirs = max(1, len(directions))
-        per_ray_throughput = np.ones(NUM_BANDS, dtype=np.float32) / float(num_dirs)
-        band_one = np.ones(NUM_BANDS, dtype=np.float32)
-        
-        print(f"Forward tracing: {num_dirs} rays")
-        
-        # Stochastic rays sample the reflected field. The zero-bounce path is
-        # evaluated separately so its level does not depend on ray count.
-        for d in directions:
-            self._trace_single_ray(mathutils.Vector(d), source, receiver, 
-                                 bvh, obj_map, per_ray_throughput)
-        
-        if self.config.include_direct or (
-            self.config.enable_diffraction
-            and getattr(self.config, 'include_primary_diffraction', True)
+class AmbisonicIREngine:
+    """Orchestrate deterministic paths, energy transport, and HOA synthesis."""
+
+    def __init__(
+        self,
+        context,
+        config: Optional[AcousticRenderConfig] = None,
+        acoustic_scene: Optional[AcousticScene] = None,
+    ):
+        self.context = context
+        self.config = config or AcousticRenderConfig.from_context(context)
+        self.scene = acoustic_scene or build_acoustic_scene(context)
+        self.tracer = ReceiverPathTracer(self.config, self.scene)
+
+    def _air_energy(self, distance_bu: float) -> np.ndarray:
+        return self.tracer._air_energy(distance_bu)
+
+    def _direct_or_diffraction_events(
+        self, source: mathutils.Vector, receiver: mathutils.Vector
+    ) -> List[AcousticEvent]:
+        direction = source - receiver
+        distance_bu = direction.length
+        if distance_bu <= self.config.eps:
+            return []
+        visibility = spectral_visibility(source, receiver, self.scene, self.config.eps)
+        events: List[AcousticEvent] = []
+
+        if np.any(visibility > 1e-10):
+            if self.config.output_content == 'FULL':
+                distance_m = distance_bu * self.config.unit_scale
+                energy = (
+                    visibility
+                    * self._air_energy(distance_bu)
+                    / max(distance_m * distance_m, 1e-12)
+                )
+                events.append(AcousticEvent(
+                    delay_seconds=distance_bu / self.config.speed_of_sound_bu,
+                    arrival_direction=direction.normalized(),
+                    energy_bands=energy.astype(np.float32),
+                    kind='DIRECT',
+                    order=0,
+                ))
+                self.tracer.stats.direct_events += 1
+            return events
+
+        if (
+            not self.config.diffraction_enabled
+            or self.config.output_content == 'DIFFUSE'
+            or self.config.diffraction_paths <= 0
         ):
-            self._add_direct_path(source, receiver, bvh, band_one)
-        
-        return self.ir
-    
-    def _trace_single_ray(self, direction: mathutils.Vector, source: mathutils.Vector,
-                         receiver: mathutils.Vector, bvh, obj_map: List[Any], 
-                         initial_throughput: np.ndarray):
-        """Trace a single ray through the scene."""
-        pos = source.copy()
-        dirn = direction.normalized()
-        throughput = initial_throughput.copy()
-        path_length = 0.0
-        bounce = 0
-        
-        while bounce <= self.config.max_bounces:
-            # Cast ray
-            hit, normal, index, dist = bvh.ray_cast(pos + dirn * self.config.eps, dirn)
-            
-            if hit is None or index is None:
-                # The deterministic direct-path calculation owns bounce zero.
-                # Capturing it here would make its level ray-count dependent and
-                # could duplicate it in Full IR mode.
-                if self.config.segment_capture and bounce > 0:
-                    self._check_segment_capture(pos, dirn, receiver, throughput, path_length)
-                break
-            
-            # Process hit
-            hit_point = mathutils.Vector(hit)
-            normal = mathutils.Vector(normal)
-            if normal.dot(dirn) > 0.0:
-                normal = -normal
-            
-            seg_length = float(dist)
-            total_distance = path_length + seg_length
-            
-            # Get material properties
-            hit_obj = obj_map[index] if 0 <= index < len(obj_map) else None
-            material = MaterialProperties(hit_obj)
-            
-            # Check for early termination
-            if not np.any(material.reflection_spectrum > 1e-6) and material.transmission <= 1e-6:
-                break
-            
-            # Segment capture for ray segments 
-            if self.config.segment_capture and bounce > 0:
-                self._check_segment_capture(pos, dirn, receiver, throughput, path_length, hit_point)
-            
-            # Direct connection to receiver
-            self._check_direct_connection(hit_point, normal, dirn, receiver, 
-                                        throughput, material, total_distance, bvh, bounce)
-            
-            # Continue ray
-            new_direction, new_throughput = self._scatter_ray(dirn, normal, material, throughput)
-            if new_direction is None:
-                break
-            
-            # Update for next iteration
-            path_length = total_distance
-            throughput = new_throughput
-            pos = hit_point + normal * self.config.eps + new_direction * (self.config.eps * 0.5)
-            dirn = new_direction
-            bounce += 1
-            
-            # Russian roulette termination with energy compensation
-            should_terminate, throughput = self._apply_russian_roulette(bounce, throughput)
-            if should_terminate:
-                break
-    
-    def _check_segment_capture(self, pos: mathutils.Vector, direction: mathutils.Vector,
-                              receiver: mathutils.Vector, throughput: np.ndarray,
-                              path_length: float, hit_point: Optional[mathutils.Vector] = None):
-        """Check if ray segment intersects receiver sphere."""
-        if hit_point is None:
-            far = pos + direction * 100.0
-        else:
-            far = hit_point
-        
-        hit, t_hit, _ = segment_hits_sphere(pos, far, receiver, self.config.receiver_radius)
-        if not hit:
-            return
-        
-        seg_len = (far - pos).length * t_hit
-        total_dist = path_length + seg_len
-        incoming = (-direction).normalized()
-        
-        amplitude_scalar = self._geometric_spreading(total_dist)
-        
-        if self.emit_impulse(throughput, total_dist, incoming, amplitude_scalar):
-            self.wrote_any = True
-    
-    def _check_direct_connection(self, hit_point: mathutils.Vector, normal: mathutils.Vector,
-                               direction: mathutils.Vector, receiver: mathutils.Vector,
-                               throughput: np.ndarray, material: MaterialProperties,
-                               path_length: float, bvh, bounce: int):
-        """Check for direct connection from hit point to receiver."""
-        from ..utils.scene_utils import los_clear
-        
-        to_receiver = receiver - hit_point
-        dist_receiver = to_receiver.length
-        
-        if dist_receiver <= 0.0:
-            return
-        
-        has_los = los_clear(hit_point + normal * self.config.eps, receiver, bvh, self.config.eps)
-        if not has_los:
-            # Keep the optional edge search bounded: primary diffraction is
-            # deterministic, while reflected diffraction is limited to the
-            # first surface interaction.
-            if bounce == 0:
-                self._add_diffraction(hit_point, normal, direction, to_receiver,
-                                    throughput, material, path_length, bvh)
-            return
-        
-        to_receiver_dir = to_receiver.normalized()
-        connection_profile = self._reflection_connection_profile(
-            direction, normal, to_receiver_dir, material
-        )
-        
-        if np.any(connection_profile > 1e-6):
-            band_amplitude = throughput * connection_profile
-            total_distance = path_length + dist_receiver
-            amplitude_scalar = self._geometric_spreading(total_distance)
-            incoming = (hit_point - receiver).normalized()
-            
-            if self.emit_impulse(band_amplitude, total_distance, incoming, amplitude_scalar):
-                self.wrote_any = True
-    
-    def _scatter_ray(self, direction: mathutils.Vector, normal: mathutils.Vector,
-                    material: MaterialProperties, throughput: np.ndarray) -> Tuple[Optional[mathutils.Vector], Optional[np.ndarray]]:
-        """Scatter ray at surface according to material properties."""
-        return self._sample_surface_scatter(direction, normal, material, throughput)
-    
-    def _add_direct_path(self, source: mathutils.Vector, receiver: mathutils.Vector, 
-                        bvh, throughput: np.ndarray):
-        """Add direct path from source to receiver."""
-        from ..utils.scene_utils import los_clear
-        
-        direction_vec = receiver - source
-        distance = direction_vec.length
-        
-        if not los_clear(source, receiver, bvh):
-            if getattr(self.config, 'include_primary_diffraction', True):
-                self._emit_primary_diffraction(source, receiver, bvh, throughput)
-            return
-        
-        if distance <= 0.0:
-            return
-
-        if not self.config.include_direct:
-            return
-        
-        incoming = (source - receiver).normalized()
-        amplitude_scalar = self._geometric_spreading(distance)
-        
-        if self.emit_impulse(throughput, distance, incoming, amplitude_scalar):
-            self.wrote_any = True
-    
-    def _add_diffraction(self, hit_point: mathutils.Vector, normal: mathutils.Vector,
-                        direction: mathutils.Vector, to_receiver: mathutils.Vector,
-                        throughput: np.ndarray, material: MaterialProperties,
-                        path_length: float, bvh):
-        """Add bounded single-edge diffraction for a blocked reflection path."""
-        if not self.config.enable_diffraction or self.config.diffraction_samples <= 0:
-            return
-
-        receiver = hit_point + to_receiver
-        paths = self._find_diffraction_paths(hit_point, receiver, bvh)
-        if not paths:
-            return
-
-        path_weight = 1.0 / float(len(paths))
-        speed_of_sound_ms = self.config.speed_of_sound * self.config.unit_scale
-        for path in paths:
-            outgoing = (path.point - hit_point).normalized()
-            reflection_profile = self._reflection_connection_profile(
-                direction, normal, outgoing, material
-            )
-            if not np.any(reflection_profile > 1e-8):
-                continue
-            diffraction_gains = maekawa_diffraction_gains(
-                path.path_difference_m,
-                speed_of_sound_ms,
-                path.bend_angle_rad,
-                self.config.diffraction_max_angle,
-            )
-            total_distance = path_length + path.distance_bu
-            incoming = (path.point - receiver).normalized()
-            if self.emit_impulse(
-                throughput
-                * reflection_profile
-                * diffraction_gains
-                * path_weight,
-                total_distance,
-                incoming,
-                self._geometric_spreading(total_distance),
-            ):
-                self.wrote_any = True
-    
-    def _should_terminate_ray(self, bounce: int, throughput: np.ndarray) -> bool:
-        """Determine if ray should be terminated."""
-        # Throughput check
-        if float(np.max(throughput)) < self.config.min_throughput:
-            return True
-        
-        # Russian roulette
-        if self.config.rr_enable and bounce >= self.config.rr_start_bounce:
-            return random.random() > self.config.rr_survive_prob
-        
-        return False
-
-
-class ReverseRayTracer(ImpulseResponseRenderer):
-    """Reverse ray tracer (receiver to source)."""
-    
-    def trace_rays(self, source: mathutils.Vector, receiver: mathutils.Vector,
-                   bvh, obj_map: List[Any], directions: List[Tuple[float, float, float]]) -> np.ndarray:
-        """Trace rays from receiver towards source."""
-        if bvh is None:
-            return self.ir
-        
-        num_dirs = max(1, len(directions))
-        per_ray_throughput = np.ones(NUM_BANDS, dtype=np.float32) / float(num_dirs)
-        band_one = np.ones(NUM_BANDS, dtype=np.float32)
-        
-        print(f"Reverse tracing: {num_dirs} rays")
-        
-        rays_traced = 0
-        for d in directions:
-            first_direction = mathutils.Vector(d).normalized()
-            self._trace_single_ray(first_direction, receiver, source, bvh, obj_map, 
-                                 per_ray_throughput, first_direction)
-            rays_traced += 1
-        
-        if self.config.include_direct or (
-            self.config.enable_diffraction
-            and getattr(self.config, 'include_primary_diffraction', True)
-        ):
-            self._add_direct_path(source, receiver, bvh, band_one)
-        
-        print(
-            f"Reverse tracing complete: {rays_traced} rays, "
-            f"{getattr(self, 'connection_count', 0)} source connections"
-        )
-        
-        return self.ir
-    
-    def _trace_single_ray(self, direction: mathutils.Vector, start_pos: mathutils.Vector,
-                         target: mathutils.Vector, bvh, obj_map: List[Any],
-                         initial_throughput: np.ndarray, arrival_direction: mathutils.Vector):
-        """Trace a single reverse ray from receiver toward room, checking for source connections."""
-        pos = start_pos
-        dirn = direction
-        throughput = initial_throughput.copy()
-        path_length = 0.0
-        bounce = 0
-        
-        while bounce < self.config.max_bounces:
-            # Cast ray to find next surface hit
-            hit, hit_point, normal, face_index = self._cast_ray(pos, dirn, bvh)
-            
-            if not hit:
-                # Ray escaped to infinity - no more bounces
-                break
-                
-            # Calculate path length to hit point
-            seg_length = (hit_point - pos).length
-            path_length += seg_length
-            
-            # Get material properties
-            material = self._get_material_properties(face_index, obj_map)
-            
-            # Connect this reflected path back to the source when visible.
-            self._check_source_connection(hit_point, normal, target, throughput, 
-                                        material, path_length, bvh, dirn,
-                                        arrival_direction, bounce)
-
-            new_direction, new_throughput = self._sample_surface_scatter(
-                dirn, normal, material, throughput
-            )
-            if new_direction is None:
-                break
-            throughput = new_throughput
-            
-            # Standard energy threshold check - no special treatment for absorptive materials
-            if np.max(throughput) < self.config.min_throughput:
-                break
-                
-            # Update for next iteration
-            pos = hit_point + normal * self.config.eps + new_direction * (self.config.eps * 0.5)
-            dirn = new_direction
-            bounce += 1
-
-            should_terminate, throughput = self._apply_russian_roulette(
-                bounce, throughput
-            )
-            if should_terminate:
-                break
-    
-    def _check_source_connection(self, hit_point: mathutils.Vector, normal: mathutils.Vector,
-                               source: mathutils.Vector, throughput: np.ndarray, 
-                               material: MaterialProperties, path_length: float,
-                               bvh, ray_direction: mathutils.Vector,
-                               arrival_direction: mathutils.Vector, bounce: int):
-        """Check for direct line-of-sight connection from hit point to source."""
-        from ..utils.scene_utils import los_clear
-
-        to_source = source - hit_point
-        distance_to_source = to_source.length
-
-        if distance_to_source <= self.config.eps:
-            return
-
-        source_direction = to_source / distance_to_source
-
-        if source_direction.dot(normal) <= 0.0:
-            return
-
-        if not los_clear(hit_point + normal * self.config.eps, source, bvh):
-            return
-
-        connection_profile = self._reflection_connection_profile(
-            ray_direction, normal, source_direction, material
-        )
-        if not np.any(connection_profile > 1e-6):
-            return
-
-        total_distance = path_length + distance_to_source
-        final_throughput = throughput * connection_profile
-        emission_success = self.emit_impulse(
-            final_throughput,
-            total_distance,
-            arrival_direction,
-            self._geometric_spreading(total_distance),
-        )
-
-        if emission_success:
-            if not hasattr(self, 'connection_count'):
-                self.connection_count = 0
-            self.connection_count += 1
-            self.wrote_any = True
-    
-    def _add_direct_path(self, source: mathutils.Vector, receiver: mathutils.Vector,
-                        bvh, throughput: np.ndarray):
-        """Add direct path contribution."""
-        from ..utils.scene_utils import los_clear
-        
-        if not los_clear(source, receiver, bvh):
-            if getattr(self.config, 'include_primary_diffraction', True):
-                self._emit_primary_diffraction(source, receiver, bvh, throughput)
-            return
-        
-        direction_vec = receiver - source
-        distance = direction_vec.length
-        
-        if distance <= 0.0:
-            return
-
-        if not self.config.include_direct:
-            return
-        
-        incoming = (source - receiver).normalized()
-        amplitude_scalar = self._geometric_spreading(distance)
-        
-        if self.emit_impulse(throughput, distance, incoming, amplitude_scalar):
-            self.wrote_any = True
-
-
-def create_ray_tracer(tracing_mode: str, config: RayTracingConfig) -> ImpulseResponseRenderer:
-    """Factory function to create appropriate ray tracer."""
-    if tracing_mode == 'FORWARD':
-        return ForwardRayTracer(config)
-    elif tracing_mode == 'REVERSE':
-        return ReverseRayTracer(config)
-    else:
-        raise ValueError(f"Unknown tracing mode: {tracing_mode}")
-
-
-def trace_impulse_response(context, source: mathutils.Vector, receiver: mathutils.Vector,
-                          bvh, obj_map: List[Any], 
-                          directions: Optional[List[Tuple[float, float, float]]] = None,
-                          config: Optional[RayTracingConfig] = None) -> np.ndarray:
-    """Main entry point for impulse response tracing using hybrid approach."""
-    if config is None:
-        config = RayTracingConfig(context)
-    
-    if directions is None:
-        directions = generate_ray_directions(config.num_rays)
-    
-    # Get user's preferred tracing mode
-    user_trace_mode = context.scene.airt_trace_mode
-    
-    if user_trace_mode == 'HYBRID':
-        # Hybrid approach: combine both methods.
-        print("Hybrid tracing: Forward early field + Reverse late field")
-        return _trace_hybrid(config, source, receiver, bvh, obj_map, directions)
-        
-    else:
-        # Single-method approach
-        print(f"Single-method mode: {user_trace_mode}")
-        tracer = create_ray_tracer(user_trace_mode, config)
-        return tracer.trace_rays(source, receiver, bvh, obj_map, directions)
-
-
-def _trace_hybrid(config: RayTracingConfig, source: mathutils.Vector, receiver: mathutils.Vector,
-                  bvh, obj_map: List[Any], directions: List[Tuple[float, float, float]]) -> np.ndarray:
-    """Hybrid tracing: Forward for early reflections + Reverse for late reverb."""
-    
-    # Split ray budget between methods
-    early_rays = directions[:len(directions)//2]  # First half for forward
-    late_rays = directions[len(directions)//2:]   # Second half for reverse
-    
-    print(f"  Forward rays: {len(early_rays)} (early reflections)")
-    print(f"  Reverse rays: {len(late_rays)} (late reverb)")
-    
-    # Forward tracing owns the direct path and early reflections.
-    forward_tracer = create_ray_tracer('FORWARD', config)
-    ir_early = forward_tracer.trace_rays(source, receiver, bvh, obj_map, early_rays)
-    
-    # Reverse tracing contributes only the diffuse tail in hybrid mode. This
-    # avoids adding the same deterministic direct path twice.
-    import copy
-    config_late = copy.copy(config)  # Share immutable scene acceleration data
-    config_late.include_direct = False
-    config_late.include_primary_diffraction = False
-    reverse_tracer = create_ray_tracer('REVERSE', config_late)
-    ir_late = reverse_tracer.trace_rays(source, receiver, bvh, obj_map, late_rays)
-    
-    # Combine with time-based weighting
-    ir_combined = _blend_early_late(ir_early, ir_late, config)
-    
-    return ir_combined
-
-
-def _blend_early_late(ir_early: np.ndarray, ir_late: np.ndarray, config: RayTracingConfig) -> np.ndarray:
-    """Hybrid blend: adaptive forward tail + dynamic reverse scaling (Option B)."""
-
-    samples = ir_early.shape[1]
-    sr = config.sample_rate
-    time_axis = np.arange(samples) / sr
-
-    # --- 1. Determine ramp window ---
-    ramp_start = 0.05  # fixed 50ms onset for reverse participation
-    ramp_end = config.hybrid_reverb_ramp_time  # user parameter (0.05-0.5 s)
-    if ramp_end <= ramp_start:
-        ramp_end = ramp_start + 0.02  # safety
-
-    # --- 2. Compute overlap RMS for dynamic reverse scaling ---
-    overlap_start_sample = int(ramp_start * sr)
-    overlap_end_sample = int(min(ramp_end + 0.25, samples / sr) * sr)
-    overlap_slice = slice(overlap_start_sample, overlap_end_sample)
-
-    def safe_rms(x: np.ndarray) -> float:
-        if x.size == 0:
-            return 0.0
-        return float(np.sqrt(np.mean(x ** 2)))
-
-    fwd_rms_overlap = safe_rms(ir_early[:, overlap_slice])
-    rev_rms_overlap = safe_rms(ir_late[:, overlap_slice])
-
-    target_ratio = 0.9  # aim reverse slightly below forward during overlap
-    if rev_rms_overlap > 0.0 and fwd_rms_overlap > 0.0:
-        reverse_scale = (fwd_rms_overlap / rev_rms_overlap) * target_ratio
-    else:
-        reverse_scale = 0.3
-    reverse_scale = float(np.clip(reverse_scale, 0.2, 2.0))
-    ir_late_scaled = ir_late * reverse_scale
-    # --- 3. Estimate RT60 (fallback if not measurable) for adaptive forward tail ---
-    # Rough early slope: use 0.1-0.4 s window if energy present
-    def estimate_rt60(ir: np.ndarray) -> float:
-        win_a = int(0.1 * sr)
-        win_b = int(min(0.4, samples / sr - 0.01) * sr)
-        mono = np.mean(ir, axis=0)
-        seg = mono[win_a:win_b]
-        if seg.size < sr * 0.05:
-            return 1.0
-        eps = 1e-12
-        env = np.sqrt(np.convolve(seg**2, np.ones(512)/512, mode='same') + eps)
-        db = 20 * np.log10(np.maximum(env, eps))
-        t_local = np.linspace(0, (seg.size-1)/sr, seg.size)
-        # simple linear fit
-        A = np.vstack([t_local, np.ones_like(t_local)]).T
+            return events
         try:
-            m, c = np.linalg.lstsq(A, db, rcond=None)[0]
-            if m >= -1e-3:  # slope not negative => fallback
-                return 1.0
-            rt60_est = -60.0 / m
-            return float(np.clip(rt60_est, 0.3, 6.0))
-        except Exception:
-            return 1.0
+            edge_index = build_diffraction_edge_index(self.context)
+            paths = find_diffraction_paths(
+                source,
+                receiver,
+                edge_index,
+                self.scene.bvh,
+                self.config.unit_scale,
+                self.config.diffraction_max_angle_rad,
+                self.config.diffraction_paths,
+                self.config.eps,
+            )
+        except Exception as error:
+            print(f"Diffraction disabled for this render: {error}")
+            return events
 
-    rt60_guess = estimate_rt60(ir_late_scaled)
-    tau_f = 0.5 * rt60_guess  # forward residual decay constant
-    tail_floor = 0.12  # lowered minimum persistent forward share (pre late-release)
+        for path in paths:
+            pressure_gain = maekawa_diffraction_gains(
+                path.path_difference_m,
+                self.config.speed_of_sound_bu * self.config.unit_scale,
+                path.bend_angle_rad,
+                self.config.diffraction_max_angle_rad,
+            )
+            distance_m = path.distance_bu * self.config.unit_scale
+            energy = (
+                pressure_gain * pressure_gain
+                * self._air_energy(path.distance_bu)
+                / max(distance_m * distance_m * max(len(paths), 1), 1e-12)
+            )
+            events.append(AcousticEvent(
+                delay_seconds=path.distance_bu / self.config.speed_of_sound_bu,
+                arrival_direction=(path.point - receiver).normalized(),
+                energy_bands=energy.astype(np.float32),
+                kind='EARLY',
+                order=0,
+            ))
+            self.tracer.stats.diffraction_events += 1
+        return events
 
-    # --- 4. Build base forward weight (piecewise + exponential tail) ---
-    forward_weight = np.zeros_like(time_axis)
-    reverse_weight = np.zeros_like(time_axis)
+    def _first_order_specular_events(
+        self, source: mathutils.Vector, receiver: mathutils.Vector
+    ) -> List[AcousticEvent]:
+        if (
+            not self.config.early_reflections
+            or self.config.output_content == 'DIFFUSE'
+        ):
+            return []
 
-    # Early: 100% forward
-    early_mask = time_axis < ramp_start
-    forward_weight[early_mask] = 1.0
+        events: List[AcousticEvent] = []
+        seen = set()
+        for face_index, face in enumerate(self.scene.faces):
+            if not face.vertices:
+                continue
+            plane_point = face.vertices[0]
+            normal = face.normal
+            source_side = float((source - plane_point).dot(normal))
+            receiver_side = float((receiver - plane_point).dot(normal))
+            if source_side * receiver_side <= self.config.eps * self.config.eps:
+                continue
 
-    # Ramp region
-    ramp_mask = (time_axis >= ramp_start) & (time_axis <= ramp_end)
-    if np.any(ramp_mask):
-        ramp_width = ramp_end - ramp_start
-        prog = (time_axis[ramp_mask] - ramp_start) / max(ramp_width, 1e-6)
-        # cosine easing from 1.0 -> w_at_ramp_end (not directly to floor)
-        w_ramp_end = 0.35  # a bit higher than final floor to allow graceful exponential
-        smooth = 0.5 * (1 - np.cos(np.pi * prog))
-        forward_weight[ramp_mask] = 1.0 - (1.0 - w_ramp_end) * smooth
+            image_source = source - normal * (2.0 * source_side)
+            image_ray = image_source - receiver
+            denominator = float(normal.dot(image_ray))
+            if abs(denominator) <= 1e-12:
+                continue
+            fraction = float(normal.dot(plane_point - receiver)) / denominator
+            if fraction <= self.config.eps or fraction >= 1.0 - self.config.eps:
+                continue
+            reflection_point = receiver + image_ray * fraction
+            if not point_in_face(reflection_point, face):
+                continue
 
-    # Post-ramp exponential tail (primary decay toward tail_floor)
-    tail_mask = time_axis > ramp_end
-    if np.any(tail_mask):
-        t_tail = time_axis[tail_mask] - ramp_end
-        w_at_ramp_end = forward_weight[np.searchsorted(time_axis, ramp_end, side='right') - 1]
-        forward_weight[tail_mask] = tail_floor + (w_at_ramp_end - tail_floor) * np.exp(-t_tail / max(tau_f, 1e-6))
+            first_leg = (source - reflection_point).length
+            second_leg = (receiver - reflection_point).length
+            total_distance_bu = first_leg + second_leg
+            if (
+                total_distance_bu <= self.config.eps
+                or total_distance_bu / self.config.speed_of_sound_bu
+                >= self.config.duration_seconds
+            ):
+                continue
 
-    # Late forward release: further reduce residual forward energy deep in tail
-    late_release_start = ramp_end + 0.8  # seconds after which residual forward share is relaxed further
-    late_floor_min = 0.05                # ultimate late forward floor
-    tau_rel = 0.25 * rt60_guess          # faster release constant
-    late_mask = time_axis > late_release_start
-    if np.any(late_mask):
-        t_rel = time_axis[late_mask] - late_release_start
-        current = forward_weight[late_mask]
-        forward_weight[late_mask] = late_floor_min + (current - late_floor_min) * np.exp(-t_rel / max(tau_rel, 1e-6))
+            visibility_source = spectral_visibility(
+                source, reflection_point, self.scene, self.config.eps
+            )
+            visibility_receiver = spectral_visibility(
+                reflection_point, receiver, self.scene, self.config.eps
+            )
+            visibility = visibility_source * visibility_receiver
+            if not np.any(visibility > 1e-10):
+                continue
 
-    # Reverse weight is complementary (not forced perfectly complementary early for slight energy freedom)
-    reverse_weight = 1.0 - forward_weight
-    # Keep a minimum reverse presence after ramp to avoid zero-diffuse pockets
-    reverse_weight[tail_mask] = np.maximum(reverse_weight[tail_mask], 0.65)
+            material = self.tracer.material_for_face(face_index)
+            specular_energy = (
+                material.reflection_spectrum * material.specular_fraction
+            )
+            if not np.any(specular_energy > 1e-10):
+                continue
 
-    # Normalize if combined exceeds 1.05 (safety)
-    total_weight = forward_weight + reverse_weight
-    excess_mask = total_weight > 1.05
-    if np.any(excess_mask):
-        forward_weight[excess_mask] /= total_weight[excess_mask]
-        reverse_weight[excess_mask] /= total_weight[excess_mask]
+            key = (
+                round(float(reflection_point.x), 5),
+                round(float(reflection_point.y), 5),
+                round(float(reflection_point.z), 5),
+                round(total_distance_bu, 5),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            distance_m = total_distance_bu * self.config.unit_scale
+            energy = (
+                specular_energy
+                * visibility
+                * self._air_energy(total_distance_bu)
+                / max(distance_m * distance_m, 1e-12)
+            )
+            events.append(AcousticEvent(
+                delay_seconds=total_distance_bu / self.config.speed_of_sound_bu,
+                arrival_direction=(reflection_point - receiver).normalized(),
+                energy_bands=energy.astype(np.float32),
+                kind='EARLY',
+                order=1,
+            ))
+            self.tracer.stats.early_events += 1
+        return events
 
-    # --- 5. Combine with user gains ---
-    ir_combined = np.zeros_like(ir_early)
-    for ch in range(ir_early.shape[0]):
-        ir_combined[ch, :] = (
-            ir_early[ch, :] * forward_weight * config.hybrid_forward_gain_linear +
-            ir_late_scaled[ch, :] * reverse_weight * config.hybrid_reverse_gain_linear
+    def render(
+        self,
+        source: mathutils.Vector,
+        receiver: mathutils.Vector,
+        progress: Optional[Callable[[int, int], None]] = None,
+    ) -> AcousticRenderResult:
+        events = self._direct_or_diffraction_events(source, receiver)
+        events.extend(self._first_order_specular_events(source, receiver))
+        events.extend(self.tracer.trace(source, receiver, progress))
+        ir, synthesis_stats = synthesize_ambisonic_ir(
+            events,
+            self.config.sample_rate,
+            self.config.duration_seconds,
+            self.config.encoder,
+            seed=self.config.seed,
+            early_gain_db=self.config.early_gain_db,
+            diffuse_gain_db=self.config.diffuse_gain_db,
+        )
+        return AcousticRenderResult(
+            ir=ir,
+            events=events,
+            transport=self.tracer.stats,
+            synthesis=synthesis_stats,
         )
 
-    # --- 6. Diagnostics & gentle ceiling ---
-    peak_before = float(np.max(np.abs(ir_combined)))
-    if peak_before > 0.9:
-        scale = 0.9 / peak_before
-        ir_combined *= scale
 
-    return ir_combined
+def render_impulse_response(
+    context,
+    source: mathutils.Vector,
+    receiver: mathutils.Vector,
+    progress: Optional[Callable[[int, int], None]] = None,
+) -> AcousticRenderResult:
+    """Public entry point for the unified acoustic renderer."""
+    return AmbisonicIREngine(context).render(source, receiver, progress)
+
+
+def trace_impulse_response(
+    context,
+    source: mathutils.Vector,
+    receiver: mathutils.Vector,
+    _bvh=None,
+    _obj_map=None,
+    **_unused,
+) -> np.ndarray:
+    """Compatibility entry point returning only the rendered IR array."""
+    return render_impulse_response(context, source, receiver).ir
+
+
+# Transitional alias for external scripts that constructed the old config.
+RayTracingConfig = AcousticRenderConfig

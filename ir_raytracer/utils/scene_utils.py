@@ -1,151 +1,265 @@
 # -*- coding: utf-8 -*-
-"""
-Scene and Blender-specific utilities for the Ambisonic IR Tracer.
-"""
+"""Blender scene extraction and acoustic visibility utilities."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+import os
+import tempfile
+from typing import Any, List, Optional, Sequence, Tuple
+
 import bpy
 import mathutils
 import mathutils.bvhtree
 import numpy as np
-from typing import Tuple, List, Optional, Any
-import os
-import tempfile
+
+
+@dataclass
+class AcousticFace:
+    """One evaluated mesh polygon in world space."""
+
+    vertices: Tuple[mathutils.Vector, ...]
+    normal: mathutils.Vector
+    object_ref: Any
+
+
+@dataclass
+class AcousticScene:
+    """Acceleration structure and face metadata for one render."""
+
+    bvh: Optional[mathutils.bvhtree.BVHTree]
+    faces: List[AcousticFace]
+
+    @property
+    def object_map(self) -> List[Any]:
+        return [face.object_ref for face in self.faces]
+
+
+def _face_normal(vertices: Sequence[mathutils.Vector]) -> mathutils.Vector:
+    if len(vertices) < 3:
+        return mathutils.Vector((0.0, 0.0, 1.0))
+    origin = vertices[0]
+    for index in range(1, len(vertices) - 1):
+        normal = (vertices[index] - origin).cross(vertices[index + 1] - origin)
+        if normal.length_squared > 1e-16:
+            return normal.normalized()
+    return mathutils.Vector((0.0, 0.0, 1.0))
+
+
+def build_acoustic_scene(context) -> AcousticScene:
+    """Build a BVH from visible evaluated meshes using evaluated transforms."""
+    scene = getattr(context, "scene", None) or bpy.context.scene
+    view_layer = getattr(context, "view_layer", None)
+    depsgraph_get = getattr(context, "evaluated_depsgraph_get", None)
+    depsgraph = (
+        depsgraph_get()
+        if callable(depsgraph_get)
+        else bpy.context.evaluated_depsgraph_get()
+    )
+
+    vertices: List[mathutils.Vector] = []
+    polygons: List[Tuple[int, ...]] = []
+    faces: List[AcousticFace] = []
+
+    for obj in scene.objects:
+        visible = obj.visible_get(view_layer=view_layer) if view_layer else obj.visible_get()
+        is_selected_source = obj == getattr(scene, 'airt_source_object', None)
+        is_selected_receiver = obj == getattr(scene, 'airt_receiver_object', None)
+        if (
+            obj.type != 'MESH'
+            or not visible
+            or is_selected_source
+            or is_selected_receiver
+            or getattr(obj, 'is_acoustic_source', False)
+            or getattr(obj, 'is_acoustic_receiver', False)
+        ):
+            continue
+
+        obj_eval = obj.evaluated_get(depsgraph)
+        mesh = obj_eval.to_mesh(preserve_all_data_layers=False, depsgraph=depsgraph)
+        if mesh is None:
+            continue
+        try:
+            transform = obj_eval.matrix_world
+            world_vertices = [transform @ vertex.co for vertex in mesh.vertices]
+            base_index = len(vertices)
+            vertices.extend(vertex.copy() for vertex in world_vertices)
+
+            for polygon in mesh.polygons:
+                local_indices = tuple(int(index) for index in polygon.vertices)
+                if len(local_indices) < 3:
+                    continue
+                face_vertices = tuple(world_vertices[index].copy() for index in local_indices)
+                polygons.append(tuple(base_index + index for index in local_indices))
+                faces.append(AcousticFace(
+                    vertices=face_vertices,
+                    normal=_face_normal(face_vertices),
+                    object_ref=obj,
+                ))
+        finally:
+            obj_eval.to_mesh_clear()
+
+    bvh = (
+        mathutils.bvhtree.BVHTree.FromPolygons(vertices, polygons)
+        if polygons
+        else None
+    )
+    return AcousticScene(bvh=bvh, faces=faces)
 
 
 def build_bvh(context) -> Tuple[Optional[mathutils.bvhtree.BVHTree], List[Any]]:
-    """Build BVH tree from scene geometry.
-    
-    Returns:
-        Tuple of (BVH tree, object map) where object map maps polygon indices to objects
-    """
-    verts = []
-    polys = []
-    obj_map = []  # polygon index -> object (for absorption/scatter)
-    
+    """Compatibility wrapper returning the BVH and polygon-to-object map."""
+    acoustic_scene = build_acoustic_scene(context)
+    return acoustic_scene.bvh, acoustic_scene.object_map
+
+
+def _evaluated_world_position(obj, depsgraph) -> mathutils.Vector:
+    try:
+        return obj.evaluated_get(depsgraph).matrix_world.translation.copy()
+    except Exception:
+        return obj.matrix_world.translation.copy()
+
+
+def get_scene_source_objects(context) -> List[Any]:
     scene = getattr(context, "scene", None) or bpy.context.scene
-    view_layer = getattr(context, "view_layer", None)
-    
-    # Get depsgraph for evaluated objects
+    return [obj for obj in scene.objects if getattr(obj, 'is_acoustic_source', False)]
+
+
+def get_scene_receiver_objects(context) -> List[Any]:
+    scene = getattr(context, "scene", None) or bpy.context.scene
+    return [obj for obj in scene.objects if getattr(obj, 'is_acoustic_receiver', False)]
+
+
+def object_world_position(context, obj) -> mathutils.Vector:
     depsgraph_get = getattr(context, "evaluated_depsgraph_get", None)
-    if callable(depsgraph_get):
-        depsgraph = depsgraph_get()
-    else:
-        depsgraph = bpy.context.evaluated_depsgraph_get()
-    
-    for obj in scene.objects:
-        # Skip source and receiver objects, only process visible mesh objects
-        visible = obj.visible_get(view_layer=view_layer) if view_layer else obj.visible_get()
-        is_source = getattr(obj, 'is_acoustic_source', False)
-        is_receiver = getattr(obj, 'is_acoustic_receiver', False)
-        
-        if (obj.type == 'MESH' and not is_source and not is_receiver and visible):
-            obj_eval = obj.evaluated_get(depsgraph)
-            mesh = obj_eval.to_mesh(preserve_all_data_layers=False, depsgraph=depsgraph)
-            
-            if mesh is None:
-                continue
-            
-            # Transform to world coordinates
-            mesh.transform(obj.matrix_world)
-            
-            # Add vertices and polygons
-            base_index = len(verts)
-            verts.extend([v.co.copy() for v in mesh.vertices])
-            polys.extend([tuple(base_index + vi for vi in p.vertices) for p in mesh.polygons])
-            obj_map.extend([obj] * len(mesh.polygons))
-            
-            # Clean up
-            obj_eval.to_mesh_clear()
-    
-    # Build BVH tree
-    bvh = mathutils.bvhtree.BVHTree.FromPolygons(verts, polys) if polys else None
-    return bvh, obj_map
+    depsgraph = (
+        depsgraph_get()
+        if callable(depsgraph_get)
+        else bpy.context.evaluated_depsgraph_get()
+    )
+    return _evaluated_world_position(obj, depsgraph)
 
 
 def get_scene_sources(context) -> List[mathutils.Vector]:
-    """Get all acoustic source positions from the scene."""
-    scene = getattr(context, "scene", None) or bpy.context.scene
-    sources = []
-    for obj in scene.objects:
-        if getattr(obj, 'is_acoustic_source', False):
-            sources.append(obj.location.copy())
-    return sources
+    return [object_world_position(context, obj) for obj in get_scene_source_objects(context)]
 
 
 def get_scene_receivers(context) -> List[mathutils.Vector]:
-    """Get all acoustic receiver positions from the scene."""
-    scene = getattr(context, "scene", None) or bpy.context.scene
-    receivers = []
-    for obj in scene.objects:
-        if getattr(obj, 'is_acoustic_receiver', False):
-            receivers.append(obj.location.copy())
-    return receivers
+    return [object_world_position(context, obj) for obj in get_scene_receiver_objects(context)]
 
 
-def los_clear(p0: mathutils.Vector, p1: mathutils.Vector, 
-              bvh: mathutils.bvhtree.BVHTree, eps: float = 1e-4) -> bool:
-    """Check if line of sight is clear between two points."""
+def los_clear(
+    p0: mathutils.Vector,
+    p1: mathutils.Vector,
+    bvh: Optional[mathutils.bvhtree.BVHTree],
+    eps: float = 1e-4,
+) -> bool:
+    """Return whether an opaque straight segment is unobstructed."""
     if bvh is None:
         return True
-    
-    d = (p1 - p0)
-    dist = d.length
-    if dist <= 1e-9:
+    delta = p1 - p0
+    distance = delta.length
+    if distance <= eps:
         return True
-    
-    dirn = d.normalized()
-    hit, nrm, idx, t = bvh.ray_cast(p0 + dirn * eps, dirn)
-    
-    if hit is None:
-        return True
-    
-    return t >= dist - 1e-4
+    direction = delta / distance
+    hit, _normal, _index, hit_distance = bvh.ray_cast(
+        p0 + direction * eps, direction
+    )
+    return hit is None or hit_distance >= distance - eps * 2.0
+
+
+def spectral_visibility(
+    p0: mathutils.Vector,
+    p1: mathutils.Vector,
+    acoustic_scene: AcousticScene,
+    eps: float = 1e-4,
+    max_surfaces: int = 32,
+) -> np.ndarray:
+    """Accumulate per-band energy transmission along a straight segment."""
+    from ..core.acoustics import MaterialProperties, NUM_BANDS
+
+    bvh = acoustic_scene.bvh
+    if bvh is None:
+        return np.ones(NUM_BANDS, dtype=np.float32)
+
+    delta = p1 - p0
+    total_distance = delta.length
+    if total_distance <= eps:
+        return np.ones(NUM_BANDS, dtype=np.float32)
+    direction = delta / total_distance
+    origin = p0 + direction * eps
+    travelled = eps
+    gain = np.ones(NUM_BANDS, dtype=np.float64)
+
+    for _surface in range(max_surfaces):
+        hit, _normal, face_index, hit_distance = bvh.ray_cast(origin, direction)
+        if hit is None or face_index is None:
+            break
+        if travelled + hit_distance >= total_distance - eps * 2.0:
+            break
+        if not (0 <= face_index < len(acoustic_scene.faces)):
+            return np.zeros(NUM_BANDS, dtype=np.float32)
+
+        material = MaterialProperties(acoustic_scene.faces[face_index].object_ref)
+        gain *= material.transmission_spectrum
+        if float(np.max(gain)) <= 1e-10:
+            return np.zeros(NUM_BANDS, dtype=np.float32)
+
+        step = float(hit_distance) + eps * 4.0
+        travelled += step
+        if travelled >= total_distance - eps:
+            break
+        origin = mathutils.Vector(hit) + direction * (eps * 4.0)
+    else:
+        return np.zeros(NUM_BANDS, dtype=np.float32)
+
+    return np.clip(gain, 0.0, 1.0).astype(np.float32)
+
+
+def point_in_face(point: mathutils.Vector, face: AcousticFace, eps: float = 1e-5) -> bool:
+    """Test a coplanar point against a possibly concave polygon."""
+    drop_axis = max(range(3), key=lambda axis: abs(face.normal[axis]))
+    axes = [axis for axis in range(3) if axis != drop_axis]
+    px, py = float(point[axes[0]]), float(point[axes[1]])
+    polygon = [
+        (float(vertex[axes[0]]), float(vertex[axes[1]]))
+        for vertex in face.vertices
+    ]
+
+    inside = False
+    for index, (x1, y1) in enumerate(polygon):
+        x2, y2 = polygon[(index + 1) % len(polygon)]
+        edge_x = x2 - x1
+        edge_y = y2 - y1
+        cross = (px - x1) * edge_y - (py - y1) * edge_x
+        if abs(cross) <= eps:
+            dot = (px - x1) * edge_x + (py - y1) * edge_y
+            if -eps <= dot <= edge_x * edge_x + edge_y * edge_y + eps:
+                return True
+        if (y1 > py) != (y2 > py):
+            intersection_x = x1 + (py - y1) * edge_x / (edge_y or 1e-20)
+            if px < intersection_x:
+                inside = not inside
+    return inside
 
 
 def get_writable_path(filename: str) -> str:
-    """Find a writable path for output files.
-    
-    Tries in order:
-    1. Next to the .blend file
-    2. Blender temp directory
-    3. System temp directory
-    4. User home directory
-    """
-    # Try blend folder first
-    try:
-        base = bpy.path.abspath("//")
-        if base and os.path.isdir(base):
-            path = os.path.join(base, filename)
-            with open(path, 'ab') as _f:
-                pass
-            return path
-    except Exception:
-        pass
-    
-    # Blender temp dir
-    try:
-        if getattr(bpy.app, 'tempdir', None):
-            path = os.path.join(bpy.app.tempdir, filename)
-            with open(path, 'ab') as _f:
-                pass
-            return path
-    except Exception:
-        pass
-    
-    # System temp
-    try:
-        path = os.path.join(tempfile.gettempdir(), filename)
-        with open(path, 'ab') as _f:
-            pass
-        return path
-    except Exception:
-        pass
-    
-    # Home as last resort
-    return os.path.join(os.path.expanduser('~'), filename)
+    """Resolve a writable output path without creating a probe file."""
+    requested = bpy.path.abspath(filename) if filename else ""
+    if requested:
+        parent = os.path.dirname(requested)
+        if parent and os.path.isdir(parent) and os.access(parent, os.W_OK):
+            return requested
+
+    basename = os.path.basename(filename or "ambisonic_ir.wav")
+    blend_directory = bpy.path.abspath("//")
+    if blend_directory and os.path.isdir(blend_directory) and os.access(blend_directory, os.W_OK):
+        return os.path.join(blend_directory, basename)
+    if getattr(bpy.app, 'tempdir', None):
+        return os.path.join(bpy.app.tempdir, basename)
+    return os.path.join(tempfile.gettempdir(), basename)
 
 
 def get_scene_unit_scale(context) -> float:
-    """Get the scene's unit scale factor."""
     scene = getattr(context, "scene", None) or bpy.context.scene
     unit_settings = getattr(scene, "unit_settings", None)
     scale_length = getattr(unit_settings, "scale_length", 1.0) if unit_settings else 1.0
@@ -153,16 +267,11 @@ def get_scene_unit_scale(context) -> float:
 
 
 def speed_of_sound_ms(context) -> float:
-    """Calculate speed of sound in m/s using scene air properties."""
     scene = getattr(context, "scene", None) or bpy.context.scene
-    temp_c = float(getattr(scene, 'airt_air_temp_c', 20.0))
-    rh = float(getattr(scene, 'airt_air_humidity', 50.0))
-    # Cramer's formula approximation
-    return float(331.3 + 0.606 * temp_c + 0.0124 * rh)
+    temperature_c = float(getattr(scene, 'airt_air_temp_c', 20.0))
+    relative_humidity = float(getattr(scene, 'airt_air_humidity', 50.0))
+    return float(331.3 + 0.606 * temperature_c + 0.0124 * relative_humidity)
 
 
 def speed_of_sound_bu(context) -> float:
-    """Calculate speed of sound in Blender units."""
-    unit_scale = get_scene_unit_scale(context)
-    c_ms = speed_of_sound_ms(context)
-    return c_ms / max(unit_scale, 1e-9)
+    return speed_of_sound_ms(context) / max(get_scene_unit_scale(context), 1e-9)

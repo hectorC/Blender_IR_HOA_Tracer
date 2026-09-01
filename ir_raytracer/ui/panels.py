@@ -1,451 +1,155 @@
-# -*- coding: utf-8 -*-
-"""
-UI panel for the Ambisonic IR Tracer.
-"""
+"""Compact artist-facing UI for the ambisonic IR renderer."""
+from __future__ import annotations
+
 import bpy
-from ..core.acoustics import BAND_LABELS, NUM_BANDS
+
+from ..core.acoustics import BAND_LABELS
 
 
-def _avg(values):
-    """Calculate average of values."""
-    return float(sum(values)) / max(len(values), 1)
-
-
-def _draw_band_vector(layout, obj, prop_name: str, title: str):
-    """Draw frequency band controls as a grid."""
-    box = layout.box()
-    box.label(text=title)
-    grid = box.grid_flow(
-        row_major=True, 
-        columns=NUM_BANDS, 
-        even_columns=True, 
-        even_rows=True, 
-        align=True
-    )
-    
-    for idx, label in enumerate(BAND_LABELS):
-        grid.prop(obj, prop_name, index=idx, text=label, slider=True)
-
-
-class AIRT_PT_Panel(bpy.types.Panel):
-    """Main panel for the Ambisonic IR Tracer."""
-    bl_idname = "AIRT_PT_panel"
-    bl_label = "IR Tracer"
-    bl_category = "IR Tracer"
+class _AIRTPanel:
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
+    bl_category = 'IR Tracer'
+
+
+class AIRT_PT_Panel(_AIRTPanel, bpy.types.Panel):
+    bl_idname = "AIRT_PT_main"
+    bl_label = "Ambisonic IR Tracer"
 
     def draw(self, context):
-        """Draw the main panel."""
         layout = self.layout
         scene = context.scene
-        
-        # Scene Validation Status (always visible at top)
-        self._draw_scene_status(layout, context)
-        
-        layout.separator()
-        
-        # Core Ray Tracing Settings
-        box = layout.box()
-        box.label(text="Ray Tracing Setup", icon='LIGHT_SUN')
-        
-        # Tracing mode (most important setting) - prominent
-        row = box.row()
-        row.scale_y = 1.2  # Make it bigger
-        row.prop(scene, "airt_trace_mode", text="")
-        
-        box.separator()
-        
-        # Essential parameters in logical grid layout (ALWAYS VISIBLE)
-        col = box.column(align=True)
-        
-        # Performance vs Quality trade-off
-        row = col.row(align=True)
-        row.prop(scene, "airt_num_rays", text="Rays")
-        row.prop(scene, "airt_passes", text="Passes")
-        
-        # Physics accuracy settings
-        row = col.row(align=True)
-        row.prop(scene, "airt_max_order", text="Max Bounces")
-        row.prop(scene, "airt_recv_radius", text="Receiver (m)")
-        
-        box.separator()
-        
-        # Quick quality preset (prominent toggle)
-        row = box.row()
-        row.scale_y = 1.1
-        icon = 'PLAY' if scene.airt_quick_broadband else 'RENDER_ANIMATION'
-        row.prop(scene, "airt_quick_broadband", text="Fast Preview Mode", toggle=True, icon=icon)
-        
-        # HYBRID CROSSFADE CONTROLS - Show only when Hybrid mode is selected
-        if scene.airt_trace_mode == 'HYBRID':
-            hybrid_box = box.box()
-            hybrid_box.label(text="🎛️ Hybrid Crossfade Controls", icon='PREFERENCES')
-            
-            # Advanced controls in a clean layout
-            col = hybrid_box.column(align=True)
-            
-            # Forward/Reverse gain controls
-            col.label(text="Gain Adjustments:")
-            row = col.row(align=True)
-            row.prop(scene, "airt_hybrid_forward_gain_db", text="Early")
-            row.prop(scene, "airt_hybrid_reverse_gain_db", text="Reverb") 
-            
-            # Crossfade timing controls
-            col.separator()
-            col.label(text="Crossfade Timing:")
-            col.prop(scene, "airt_hybrid_crossfade_start_ms", text="Start Time")
-            col.prop(scene, "airt_hybrid_crossfade_length_ms", text="Fade Length")
-            
-            # Final level controls - both independent
-            col.separator()
-            col.label(text="Final Levels:")
-            col.prop(scene, "airt_hybrid_forward_final_level", text="Forward Final Level")
-            col.prop(scene, "airt_hybrid_reverse_final_level", text="Reverse Final Level")
-            
-            # Cache controls - Show re-mix button when cache is valid
-            col.separator()
-            
-            # Import the cache validation function
-            try:
-                from .operators import _is_cache_valid
-                cache_valid = _is_cache_valid(context)
-            except ImportError:
-                cache_valid = scene.airt_hybrid_cache_valid
-            
-            if cache_valid:
-                # Cache is valid - show re-mix controls
-                cache_box = col.box()
-                cache_box.label(text="✓ IRs Cached - Ready for Re-mixing", icon='FILE_TICK')
-                
-                # Re-mix button (large and prominent)
-                remix_row = cache_box.row()
-                remix_row.scale_y = 1.5
-                remix_row.operator("airt.remix_hybrid_ir", text="🔄 Re-mix & Export", icon='FILE_REFRESH')
-                
-                # Clear cache button (smaller, less prominent)
-                clear_row = cache_box.row()
-                clear_row.scale_y = 0.8
-                clear_row.operator("airt.clear_hybrid_cache", text="Clear Cache", icon='TRASH')
-                
-                # Show last export path if available
-                if scene.airt_hybrid_last_export_path:
-                    import os
-                    filename = os.path.basename(scene.airt_hybrid_last_export_path)
-                    cache_box.label(text=f"Last: {filename}", icon='FILE_SOUND')
-            else:
-                # No cache - show status
-                if scene.airt_hybrid_cache_valid:
-                    col.label(text="⚠️ Cache invalid (scene changed)", icon='ERROR')
-                else:
-                    col.label(text="ℹ️ No cached IRs - full trace needed", icon='INFO')
-        
-        layout.separator()
-        
-        # Render Controls - Most Important Section!
-        self._draw_render_controls(layout, context)
-        
-        layout.separator()
-        
-        # Current Object Quick Info (compact)
-        self._draw_object_quick_info(layout, context)
 
-    def _draw_render_controls(self, layout, context):
-        """Draw render control buttons with proper hierarchy."""
-        box = layout.box()
-        box.label(text="Generate Impulse Response", icon='RENDER_ANIMATION')
-        
-        # Main render button (big and prominent)
-        col = box.column()
-        row = col.row()
-        row.scale_y = 1.5  # Make render button bigger
-        row.operator("airt.render_ir", icon='RENDER_ANIMATION', text="Generate IR")
-        
-        col.separator()
-        
-        # Secondary validation actions (smaller)
-        row = col.row(align=True)
-        row.operator("airt.validate_scene", icon='CHECKMARK', text="Validate Scene")
-        row.operator("airt.diagnose_scene", icon='QUESTION', text="Diagnose Issues")
+        endpoints = layout.box()
+        endpoints.label(text="Virtual Source and Listener", icon='OUTLINER_OB_SPEAKER')
+        endpoints.prop(scene, "airt_source_object")
+        endpoints.operator("airt.assign_source", icon='EYEDROPPER')
+        endpoints.prop(scene, "airt_receiver_object")
+        endpoints.operator("airt.assign_receiver", icon='EYEDROPPER')
 
-    def _draw_scene_status(self, layout, context):
-        """Draw scene validation status."""
-        try:
-            from ..utils.scene_utils import get_scene_sources, get_scene_receivers
-            sources = get_scene_sources(context)
-            receivers = get_scene_receivers(context)
-            
+        render = layout.box()
+        render.prop(scene, "airt_quality_preset", text="Quality")
+        row = render.row(align=True)
+        row.prop(scene, "airt_output_content", text="Content")
+        render.operator("airt.render_ir", icon='SOUND')
+        if scene.airt_last_render_summary:
+            render.label(text=scene.airt_last_render_summary, icon='CHECKMARK')
+
+
+class AIRT_PT_MaterialPanel(_AIRTPanel, bpy.types.Panel):
+    bl_idname = "AIRT_PT_material"
+    bl_label = "Acoustic Material"
+    bl_parent_id = "AIRT_PT_main"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object is not None and context.active_object.type == 'MESH'
+
+    def draw(self, context):
+        layout = self.layout
+        obj = context.active_object
+        layout.label(text=obj.name, icon='MESH_DATA')
+        layout.prop(obj, "airt_material_preset", text="Preset")
+
+        column = layout.column(align=True)
+        column.prop(obj, "absorption")
+        column.prop(obj, "scatter")
+        column.prop(obj, "transmission")
+        layout.prop(obj, "show_frequency_details", toggle=True)
+        if obj.show_frequency_details:
             box = layout.box()
-            if sources and receivers:
-                box.label(text=f"Scene Ready: {len(sources)} source(s), {len(receivers)} receiver(s)", icon='CHECKMARK')
-            elif not sources:
-                box.label(text="Missing: Mark objects as acoustic sources", icon='ERROR')
-            elif not receivers:
-                box.label(text="Missing: Mark objects as acoustic receivers", icon='ERROR')
-            else:
-                box.label(text="Scene validation error", icon='CANCEL')
-        except:
-            # Fallback if utils not available
-            pass
+            for index, label in enumerate(BAND_LABELS):
+                row = box.row(align=True)
+                row.label(text=label)
+                row.prop(obj, "absorption_bands", index=index, text="A")
+                row.prop(obj, "scatter_bands", index=index, text="S")
+                row.prop(obj, "transmission_bands", index=index, text="T")
 
-    def _draw_object_quick_info(self, layout, context):
-        """Draw quick info about selected object."""
-        obj = context.object
-        if not obj:
-            return
-            
-        box = layout.box()
-        box.label(text=f"Selected: {obj.name}", icon='OBJECT_DATA')
-        
-        # Object role in simulation (important for ray tracing)
-        col = box.column(align=True)
-        row = col.row(align=True)
-        row.prop(obj, "is_acoustic_source", text="Source", toggle=True)
-        row.prop(obj, "is_acoustic_receiver", text="Receiver", toggle=True)
-        
-        # Material preset for quick reference
-        if hasattr(obj, 'airt_material_preset'):
-            col.prop(obj, "airt_material_preset", text="Material Preset")
-
-    def _draw_render_settings(self, layout, context):
-        """Draw render settings section - DEPRECATED, moved to other panels."""
-        pass
+        row = layout.row(align=True)
+        row.operator("airt.reset_material", text="Reset")
+        row.operator("airt.copy_material", text="Copy to Selected")
 
 
-class AIRT_PT_AudioPanel(bpy.types.Panel):
-    """Audio output settings panel."""
-    bl_idname = "AIRT_PT_audio_panel"
-    bl_label = "Audio Output"
-    bl_category = "IR Tracer"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_parent_id = "AIRT_PT_panel"
+class AIRT_PT_AudioPanel(_AIRTPanel, bpy.types.Panel):
+    bl_idname = "AIRT_PT_audio"
+    bl_label = "IR and Output"
+    bl_parent_id = "AIRT_PT_main"
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+
+        timing = layout.column(align=True)
+        timing.prop(scene, "airt_sr")
+        timing.prop(scene, "airt_ir_seconds")
+        timing.prop(scene, "airt_output_content")
+
+        early = layout.box()
+        early.enabled = scene.airt_output_content != 'DIFFUSE'
+        early.prop(scene, "airt_early_reflections")
+        early.prop(scene, "airt_early_gain_db")
+        layout.prop(scene, "airt_diffuse_gain_db")
+
+        output = layout.box()
+        output.prop(scene, "airt_output_path")
+        output.prop(scene, "airt_wav_subtype")
+        output.prop(scene, "airt_normalization")
+        if scene.airt_normalization == 'PEAK':
+            output.prop(scene, "airt_peak_db")
+        output.label(text="16 channels — ACN/SN3D (AmbiX)", icon='INFO')
+
+
+class AIRT_PT_AdvancedPanel(_AIRTPanel, bpy.types.Panel):
+    bl_idname = "AIRT_PT_advanced"
+    bl_label = "Transport and Space"
+    bl_parent_id = "AIRT_PT_main"
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
-        """Draw audio settings panel."""
         layout = self.layout
         scene = context.scene
-        
-        # Audio format settings
-        box = layout.box()
-        box.label(text="File Output", icon='FILE_SOUND')
-        
-        col = box.column(align=True)
-        col.prop(scene, "airt_sr", text="Sample Rate")
-        col.prop(scene, "airt_ir_seconds", text="Duration (s)")
-        col.prop(scene, "airt_wav_subtype", text="WAV Format")
-        col.prop(scene, "airt_output_content", text="IR Content")
-        
-        # Spatial settings
-        box = layout.box()
-        box.label(text="Spatial Processing", icon='ORIENTATION_GIMBAL')
-        
-        col = box.column(align=True)
-        col.prop(scene, "airt_yaw_offset_deg", text="Yaw Offset (°)")
-        col.prop(scene, "airt_invert_z", text="Invert Z-axis")
-        calibration_row = col.row(align=True)
-        calibration_row.enabled = scene.airt_output_content == 'FULL'
-        calibration_row.prop(scene, "airt_calibrate_direct", text="Calibrate Direct Path")
 
-
-class AIRT_PT_MaterialPanel(bpy.types.Panel):
-    """Material properties panel - redesigned for better workflow."""
-    bl_idname = "AIRT_PT_material_panel"
-    bl_label = "Acoustic Materials"
-    bl_category = "IR Tracer"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_parent_id = "AIRT_PT_panel"
-
-    def draw(self, context):
-        """Draw material properties panel."""
-        layout = self.layout
-        obj = context.object
-        
-        if not obj:
-            layout.label(text="Select an object to edit its acoustic properties", icon='INFO')
-            return
-        
-        # Object header
-        box = layout.box()
-        box.label(text=f"Material: {obj.name}", icon='MATERIAL')
-        
-        # Material preset selector (prominent)
-        box.prop(obj, "airt_material_preset", text="")
-        
-        # Material properties section
-        col = layout.column(align=True)
-        
-        # Basic properties (always visible)
-        box = col.box()
-        box.label(text="Basic Properties", icon='MODIFIER')
-        
-        grid = box.grid_flow(row_major=True, columns=2, align=True)
-        grid.prop(obj, "absorption", text="Absorption")
-        grid.prop(obj, "scatter", text="Scatter")
-        grid.prop(obj, "transmission", text="Transmission", slider=False)
-        
-        # Show average values for quick reference
-        if hasattr(obj, 'absorption_bands') and hasattr(obj, 'scatter_bands'):
-            abs_avg = _avg(obj.absorption_bands[:])
-            scat_avg = _avg(obj.scatter_bands[:])
-            info_text = f"Spectrum averages: Abs {abs_avg:.2f}, Scatter {scat_avg:.2f}"
-            box.label(text=info_text, icon='INFO')
-        
-        # Frequency-dependent properties (collapsible)
-        self._draw_frequency_controls(col, obj)
-        
-        # Material operations
-        col.separator()
-        row = col.row(align=True)
-        row.operator("airt.copy_material", icon='COPYDOWN')
-        row.operator("airt.reset_material", icon='LOOP_BACK')
-
-    def _draw_frequency_controls(self, layout, obj):
-        """Draw frequency-dependent material controls."""
-        box = layout.box()
-        row = box.row()
-        row.prop(obj, "show_frequency_details", 
-                text="Frequency Response Details", 
-                icon='TRIA_DOWN' if getattr(obj, 'show_frequency_details', False) else 'TRIA_RIGHT',
-                emboss=False)
-        
-        # Add custom property if it doesn't exist
-        if not hasattr(obj, 'show_frequency_details'):
-            obj['show_frequency_details'] = False
-            
-        if getattr(obj, 'show_frequency_details', False):
-            _draw_band_vector(box, obj, "absorption_bands", "Absorption Spectrum")
-            _draw_band_vector(box, obj, "scatter_bands", "Scatter Spectrum")
-
-
-class AIRT_PT_AdvancedPanel(bpy.types.Panel):
-    """Advanced ray tracing physics settings."""
-    bl_idname = "AIRT_PT_advanced_panel"
-    bl_label = "Advanced Physics"
-    bl_category = "IR Tracer"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_parent_id = "AIRT_PT_panel"
-    bl_options = {'DEFAULT_CLOSED'}
-
-    def draw(self, context):
-        """Draw advanced physics settings panel."""
-        layout = self.layout
-        scene = context.scene
-        
-        # Ray termination settings
-        box = layout.box()
-        box.label(text="Ray Termination", icon='X')
-        
-        box.prop(scene, "airt_rr_enable", text="Russian Roulette Termination")
+        sampling = layout.box()
+        sampling.label(text="Receiver-Centric Sampling")
+        sampling.prop(scene, "airt_num_rays")
+        sampling.prop(scene, "airt_max_order")
+        sampling.prop(scene, "airt_seed")
+        sampling.prop(scene, "airt_spec_rough_deg")
+        sampling.prop(scene, "airt_min_throughput")
+        sampling.prop(scene, "airt_rr_enable")
         if scene.airt_rr_enable:
-            col = box.column()
-            col.prop(scene, "airt_rr_start", text="Start Bounce")
-            col.prop(scene, "airt_rr_p", text="Survival Probability")
-        
-        if hasattr(scene, 'airt_min_throughput'):
-            box.prop(scene, "airt_min_throughput", text="Min Energy Threshold")
-        
-        # Surface physics
-        box = layout.box()
-        box.label(text="Surface Physics", icon='MESH_ICOSPHERE')
-        
-        col = box.column(align=True)
-        col.prop(scene, "airt_spec_rough_deg", text="Specular Roughness (°)")
-        col.prop(scene, "airt_angle_tol_deg", text="Angle Tolerance (°)")
-        col.prop(scene, "airt_enable_seg_capture", text="Segment Capture")
-        
-        # Warning for Forward mode without segment capture
-        if scene.airt_trace_mode == 'FORWARD' and not scene.airt_enable_seg_capture:
-            warning_box = col.box()
-            warning_box.alert = True
-            warning_box.label(text="⚠ Forward tracing needs Segment Capture!", icon='ERROR')
-        
-        # Diffraction modeling
-        box.prop(scene, "airt_enable_diffraction", text="Edge Diffraction (Approx.)")
-        if scene.airt_enable_diffraction:
-            sub = box.column()
-            sub.prop(scene, "airt_diffraction_samples", text="Max Paths")
-            sub.prop(scene, "airt_diffraction_max_deg", text="Max Angle (°)")
-        
-        # Air absorption modeling
-        box = layout.box()
-        box.label(text="Air Absorption", icon='MOD_FLUID')
-        
-        box.prop(scene, "airt_air_enable", text="Enable Air Absorption")
+            row = sampling.row(align=True)
+            row.prop(scene, "airt_rr_start")
+            row.prop(scene, "airt_rr_p")
+
+        air = layout.box()
+        air.prop(scene, "airt_air_enable")
         if scene.airt_air_enable:
-            col = box.column()
-            col.prop(scene, "airt_air_temp_c", text="Temperature (°C)")
-            col.prop(scene, "airt_air_humidity", text="Humidity (%)")
-            col.prop(scene, "airt_air_pressure_kpa", text="Pressure (kPa)")
-        
-        # Random seed
-        layout.separator()
-        layout.prop(scene, "airt_seed", text="Random Seed")
+            air.prop(scene, "airt_air_temp_c")
+            air.prop(scene, "airt_air_humidity")
+            air.prop(scene, "airt_air_pressure_kpa")
+
+        diffraction = layout.box()
+        diffraction.prop(scene, "airt_enable_diffraction")
+        if scene.airt_enable_diffraction:
+            diffraction.prop(scene, "airt_diffraction_samples")
+            diffraction.prop(scene, "airt_diffraction_max_deg")
+            diffraction.label(text="Single-edge artistic approximation", icon='INFO')
+
+        orientation = layout.box()
+        orientation.label(text="Ambisonic Orientation")
+        orientation.prop(scene, "airt_yaw_offset_deg")
+        orientation.prop(scene, "airt_invert_z")
 
 
-class AIRT_PT_DiagnosticsPanel(bpy.types.Panel):
-    """Scene diagnostics and validation panel."""
-    bl_idname = "AIRT_PT_diagnostics_panel"
-    bl_label = "Diagnostics & Validation"
-    bl_category = "IR Tracer"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_parent_id = "AIRT_PT_panel"
+class AIRT_PT_DiagnosticsPanel(_AIRTPanel, bpy.types.Panel):
+    bl_idname = "AIRT_PT_diagnostics"
+    bl_label = "Diagnostics"
+    bl_parent_id = "AIRT_PT_main"
     bl_options = {'DEFAULT_CLOSED'}
 
-    def draw(self, context):
-        """Draw diagnostics panel."""
+    def draw(self, _context):
         layout = self.layout
-        
-        # Scene analysis tools
-        box = layout.box()
-        box.label(text="Scene Analysis", icon='VIEWZOOM')
-        
-        col = box.column(align=True)
-        col.operator("airt.validate_scene", 
-                    text="Validate Scene Setup", 
-                    icon='CHECKMARK')
-        col.operator("airt.diagnose_scene", 
-                    text="Diagnose Reverb Issues", 
-                    icon='QUESTION')
-        col.operator("airt.check_dependencies",
-                    text="Check Dependencies",
-                    icon='PACKAGE')
-        
-        # Material tools
-        box = layout.box()
-        box.label(text="Material Tools", icon='MATERIAL')
-        
-        if context.object:
-            col = box.column(align=True)
-            col.operator("airt.copy_material", 
-                        text=f"Copy from {context.object.name}", 
-                        icon='COPYDOWN')
-            col.operator("airt.reset_material", 
-                        text=f"Reset {context.object.name}", 
-                        icon='LOOP_BACK')
-        else:
-            box.label(text="Select object for material tools", icon='INFO')
-        
-        # Performance info
-        if hasattr(context.scene, 'airt_num_rays'):
-            box = layout.box()
-            box.label(text="Performance Estimate", icon='TIME')
-            
-            rays = context.scene.airt_num_rays
-            passes = getattr(context.scene, 'airt_passes', 1)
-            bounces = getattr(context.scene, 'airt_max_order', 50)
-            
-            total_rays = rays * passes
-            complexity = "Low" if total_rays < 5000 else "Medium" if total_rays < 20000 else "High"
-            
-            col = box.column()
-            col.label(text=f"Total rays: {total_rays:,}")
-            col.label(text=f"Max bounces: {bounces}")
-            col.label(text=f"Complexity: {complexity}")
-            
-            if total_rays > 50000:
-                col.label(text="Warning: Very high ray count", icon='ERROR')
+        layout.operator("airt.validate_scene", icon='CHECKMARK')
+        layout.operator("airt.check_dependencies", icon='FILE_REFRESH')
