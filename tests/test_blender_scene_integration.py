@@ -23,6 +23,7 @@ from ir_raytracer.core.ray_tracer import AmbisonicIREngine  # noqa: E402
 from ir_raytracer.utils.scene_utils import (  # noqa: E402
     build_acoustic_scene,
     object_world_position,
+    object_world_rotation,
 )
 
 
@@ -51,6 +52,7 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
         scene.airt_enable_diffraction = False
         scene.airt_early_reflections = True
         scene.airt_early_order = 2
+        scene.airt_use_receiver_orientation = True
 
     def _endpoint(self, name, location, source=False):
         obj = bpy.data.objects.new(name, None)
@@ -163,6 +165,37 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
             atol=1e-7,
         )
 
+    def test_receiver_parent_rotation_orients_ambisonic_field(self):
+        parent = bpy.data.objects.new("Receiver Parent", None)
+        parent.rotation_euler = (0.0, 0.0, pi / 2.0)
+        parent.scale = (2.0, 3.0, 4.0)
+        bpy.context.scene.collection.objects.link(parent)
+        self._endpoint("Source", (1.0, 0.0, 0.0), source=True)
+        receiver = self._endpoint("Receiver", (0.0, 0.0, 0.0))
+        receiver.parent = parent
+        bpy.context.view_layer.update()
+
+        rotation = object_world_rotation(bpy.context, receiver)
+        np.testing.assert_allclose(
+            rotation @ Vector((0.0, -1.0, 0.0)),
+            Vector((1.0, 0.0, 0.0)),
+            atol=1e-6,
+        )
+
+        scene = bpy.context.scene
+        scene.airt_ir_seconds = 0.1
+        scene.airt_use_receiver_orientation = True
+        receiver_aligned = self._render('FULL')
+        scene.airt_use_receiver_orientation = False
+        world_aligned = self._render('FULL')
+
+        # World +X is receiver-local front after the parent's +90 degree yaw.
+        self.assertAlmostEqual(float(np.sum(receiver_aligned.ir[3])), 1.0, places=5)
+        self.assertAlmostEqual(float(np.sum(receiver_aligned.ir[1])), 0.0, places=5)
+        # With the option disabled, Blender world +X remains AmbiX left.
+        self.assertAlmostEqual(float(np.sum(world_aligned.ir[1])), 1.0, places=5)
+        self.assertAlmostEqual(float(np.sum(world_aligned.ir[3])), 0.0, places=5)
+
     def test_scene_builder_uses_evaluated_world_geometry(self):
         room = self._room()
         room.location = (7.0, 0.0, 0.0)
@@ -189,6 +222,7 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
             self.assertTrue(scene.airt_early_reflections)
             self.assertEqual(scene.airt_early_order, 2)
             self.assertEqual(scene.airt_early_path_budget, 1_000_000)
+            self.assertTrue(scene.airt_use_receiver_orientation)
             self.assertTrue(scene.airt_air_enable)
             self.assertFalse(scene.airt_enable_diffraction)
             self.assertEqual(scene.airt_seed, 1)
@@ -349,6 +383,11 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
             self.assertGreater(
                 metadata["deterministic_path_stats"]["events_by_order"]["2"],
                 0,
+            )
+            self.assertEqual(metadata["orientation"]["reference"], "receiver_local")
+            self.assertEqual(
+                len(metadata["orientation"]["receiver_world_quaternion_wxyz"]),
+                4,
             )
 
 

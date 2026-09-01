@@ -354,9 +354,18 @@ def register_acoustic_props():
     )
     scene.airt_yaw_offset_deg = bpy.props.FloatProperty(
         name="Ambisonic Yaw",
+        description="Additional output rotation around the ambisonic up axis",
         default=0.0,
         min=-180.0,
         max=180.0,
+    )
+    scene.airt_use_receiver_orientation = bpy.props.BoolProperty(
+        name="Use Receiver Orientation",
+        description=(
+            "Express arrival directions in the receiver's evaluated local "
+            "rotation instead of fixed Blender world axes"
+        ),
+        default=True,
     )
     scene.airt_invert_z = bpy.props.BoolProperty(
         name="Flip Ambisonic Z",
@@ -412,7 +421,8 @@ def unregister_acoustic_props():
         'airt_air_enable', 'airt_air_temp_c', 'airt_air_humidity',
         'airt_air_pressure_kpa', 'airt_enable_diffraction',
         'airt_diffraction_samples', 'airt_diffraction_max_deg',
-        'airt_yaw_offset_deg', 'airt_invert_z', 'airt_output_path',
+        'airt_use_receiver_orientation', 'airt_yaw_offset_deg',
+        'airt_invert_z', 'airt_output_path',
         'airt_wav_subtype', 'airt_normalization', 'airt_peak_db',
         'airt_last_render_summary',
     )

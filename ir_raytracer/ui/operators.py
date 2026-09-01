@@ -156,6 +156,19 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
                     "maximum_paths": config.diffraction_paths,
                 },
                 "orientation": {
+                    "reference": (
+                        "receiver_local"
+                        if config.encoder.use_receiver_orientation
+                        else "blender_world"
+                    ),
+                    "use_receiver_orientation": (
+                        config.encoder.use_receiver_orientation
+                    ),
+                    "receiver_world_quaternion_wxyz": (
+                        list(config.encoder.receiver_rotation)
+                        if config.encoder.use_receiver_orientation
+                        else None
+                    ),
                     "yaw_degrees": config.encoder.yaw_offset_deg,
                     "invert_z": config.encoder.invert_z,
                 },

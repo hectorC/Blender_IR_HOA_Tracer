@@ -141,10 +141,16 @@ rather than a sequence of edges.
 Output WAV files always contain 16 planar channels in ACN order with SN3D
 normalization (AmbiX): `W, Y, Z, X, V, T, R, S, U, Q, O, M, K, L, N, P`.
 
-The default mapping treats Blender Front (`-Y`) as AmbiX front (`+X`), Blender
-`+X` as AmbiX left (`+Y`), and Blender `+Z` as up. Ambisonic Yaw rotates the
-result around up; Flip Ambisonic Z supports workflows with the opposite vertical
-convention.
+**Use Receiver Orientation** is enabled by default. Every arrival is transformed
+into the receiver object's evaluated local rotation, including parent rotation,
+before ambisonic encoding. Receiver-local Front (`-Y`) maps to AmbiX front
+(`+X`), local `+X` maps to AmbiX left (`+Y`), and local `+Z` maps to up. Scale
+and translation do not affect this orientation.
+
+Disable the option to retain a Blender-world-aligned sound field using those
+same axis mappings. **Ambisonic Yaw** applies an additional rotation around the
+ambisonic up axis after the receiver transform; **Flip Ambisonic Z** supports
+workflows with the opposite vertical convention.
 
 A JSON sidecar is written next to each WAV with the format, channels, source,
 receiver, render settings, normalization gain, and event counts.

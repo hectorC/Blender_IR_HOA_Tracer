@@ -25,6 +25,7 @@ from ..utils.scene_utils import (
     AcousticScene,
     build_acoustic_scene,
     get_scene_unit_scale,
+    object_world_rotation,
     point_in_face,
     spectral_visibility,
     speed_of_sound_bu,
@@ -69,6 +70,20 @@ class AcousticRenderConfig:
         output_content = getattr(scene, 'airt_output_content', 'FULL')
         if output_content not in {'FULL', 'REFLECTIONS', 'DIFFUSE'}:
             output_content = 'FULL'
+        use_receiver_orientation = bool(
+            getattr(scene, 'airt_use_receiver_orientation', True)
+        )
+        receiver_object = getattr(scene, 'airt_receiver_object', None)
+        if receiver_object is None:
+            receiver_object = next((
+                obj for obj in scene.objects
+                if getattr(obj, 'is_acoustic_receiver', False)
+            ), None)
+        receiver_rotation = (
+            object_world_rotation(context, receiver_object)
+            if use_receiver_orientation and receiver_object is not None
+            else None
+        )
         return cls(
             ray_count=max(1, int(getattr(scene, 'airt_num_rays', 1024))),
             max_bounces=max(0, int(getattr(scene, 'airt_max_order', 32))),
@@ -107,6 +122,7 @@ class AcousticRenderConfig:
             encoder=AmbisonicEncoder(
                 float(getattr(scene, 'airt_yaw_offset_deg', 0.0)),
                 bool(getattr(scene, 'airt_invert_z', False)),
+                receiver_rotation,
             ),
         )
 

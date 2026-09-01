@@ -152,6 +152,7 @@ class AIRT_PT_AdvancedPanel(_AIRTPanel, bpy.types.Panel):
 
         orientation = layout.box()
         orientation.label(text="Ambisonic Orientation")
+        orientation.prop(scene, "airt_use_receiver_orientation")
         orientation.prop(scene, "airt_yaw_offset_deg")
         orientation.prop(scene, "airt_invert_z")
 

@@ -146,16 +146,30 @@ def get_ambi_channel_names() -> list:
 
 
 class AmbisonicEncoder:
-    """Third-order ambisonic encoder with orientation control."""
+    """Third-order ambisonic encoder with listener orientation control."""
     
-    def __init__(self, yaw_offset_deg: float = 0.0, invert_z: bool = False):
+    def __init__(
+        self,
+        yaw_offset_deg: float = 0.0,
+        invert_z: bool = False,
+        receiver_rotation: mathutils.Quaternion | None = None,
+    ):
         """Initialize encoder with orientation settings."""
         self.yaw_offset_deg = yaw_offset_deg
         self.invert_z = invert_z
+        self.use_receiver_orientation = receiver_rotation is not None
+        if receiver_rotation is None:
+            rotation = mathutils.Quaternion((1.0, 0.0, 0.0, 0.0))
+        else:
+            rotation = receiver_rotation.copy()
+            rotation.normalize()
+        self.receiver_rotation = rotation
+        self._world_to_receiver = rotation.inverted()
     
     def encode(self, direction: mathutils.Vector) -> np.ndarray:
         """Encode a direction vector to ambisonic coefficients."""
+        receiver_relative = self._world_to_receiver @ direction
         oriented_dir = apply_orientation_transform(
-            direction, self.yaw_offset_deg, self.invert_z
+            receiver_relative, self.yaw_offset_deg, self.invert_z
         )
         return encode_ambisonics_3rd_order(oriented_dir)

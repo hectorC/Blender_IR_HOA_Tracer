@@ -13,7 +13,7 @@ import sys
 import unittest
 
 import numpy as np
-from mathutils import Vector
+from mathutils import Euler, Vector
 
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -185,6 +185,29 @@ class OrientationTransformTests(unittest.TestCase):
         self.assertAlmostEqual(float(encoded[3]), 1.0, places=6)
         self.assertAlmostEqual(float(encoded[1]), 0.0, places=6)
         self.assertAlmostEqual(float(encoded[2]), 0.0, places=6)
+
+    def test_receiver_rotation_maps_world_arrivals_into_listener_axes(self):
+        rotation = Euler((0.37, -0.52, 1.11), 'XYZ').to_quaternion()
+        encoder = AmbisonicEncoder(receiver_rotation=rotation)
+        cases = (
+            (Vector((0.0, -1.0, 0.0)), (0.0, 0.0, 1.0)),  # local front
+            (Vector((1.0, 0.0, 0.0)), (1.0, 0.0, 0.0)),   # local left
+            (Vector((0.0, 0.0, 1.0)), (0.0, 1.0, 0.0)),   # local up
+        )
+        for local_direction, expected_first_order in cases:
+            with self.subTest(local_direction=tuple(local_direction)):
+                world_direction = rotation @ local_direction
+                encoded = encoder.encode(world_direction)
+                self.assert_vector_close(encoded[1:4], expected_first_order)
+
+    def test_artistic_yaw_is_applied_after_receiver_rotation(self):
+        rotation = Euler((0.0, 0.0, math.pi / 2.0), 'XYZ').to_quaternion()
+        world_front = rotation @ Vector((0.0, -1.0, 0.0))
+        encoded = AmbisonicEncoder(
+            yaw_offset_deg=90.0,
+            receiver_rotation=rotation,
+        ).encode(world_front)
+        self.assert_vector_close(encoded[1:4], (1.0, 0.0, 0.0))
 
 
 if __name__ == "__main__":

@@ -119,6 +119,17 @@ def _evaluated_world_position(obj, depsgraph) -> mathutils.Vector:
         return obj.matrix_world.translation.copy()
 
 
+def _evaluated_world_rotation(obj, depsgraph) -> mathutils.Quaternion:
+    """Return evaluated world rotation with scale and translation removed."""
+    try:
+        matrix = obj.evaluated_get(depsgraph).matrix_world
+    except Exception:
+        matrix = obj.matrix_world
+    rotation = matrix.to_quaternion()
+    rotation.normalize()
+    return rotation
+
+
 def get_scene_source_objects(context) -> List[Any]:
     scene = getattr(context, "scene", None) or bpy.context.scene
     return [obj for obj in scene.objects if getattr(obj, 'is_acoustic_source', False)]
@@ -137,6 +148,17 @@ def object_world_position(context, obj) -> mathutils.Vector:
         else bpy.context.evaluated_depsgraph_get()
     )
     return _evaluated_world_position(obj, depsgraph)
+
+
+def object_world_rotation(context, obj) -> mathutils.Quaternion:
+    """Return an object's evaluated world-space orientation."""
+    depsgraph_get = getattr(context, "evaluated_depsgraph_get", None)
+    depsgraph = (
+        depsgraph_get()
+        if callable(depsgraph_get)
+        else bpy.context.evaluated_depsgraph_get()
+    )
+    return _evaluated_world_rotation(obj, depsgraph)
 
 
 def get_scene_sources(context) -> List[mathutils.Vector]:
