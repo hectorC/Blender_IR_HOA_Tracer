@@ -817,7 +817,7 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
             self.assertTrue(metadata["transport_strategy"]["bidirectional"])
             self.assertEqual(
                 metadata["transport_strategy"]["combination"],
-                "orderwise_uniform_mis",
+                "orderwise_uniform_mis_with_endpoint_energy_stabilization",
             )
             self.assertEqual(
                 metadata["transport_strategy"]["subpath_join_depth"], 4

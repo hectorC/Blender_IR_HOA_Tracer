@@ -203,7 +203,7 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
                     else 0
                 ),
                 "combination": (
-                    "orderwise_uniform_mis"
+                    "orderwise_uniform_mis_with_endpoint_energy_stabilization"
                     if config.bidirectional_enabled
                     else "receiver_launched"
                 ),

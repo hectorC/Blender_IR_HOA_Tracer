@@ -637,19 +637,9 @@ class ReceiverPathTracer:
                 'DIFFUSE',
             )
         probability = max(float(probabilities[2]), 1e-12)
-        sampled = self._sample_specular_lobe(direction, normal)
-        exponent = self._roughness_exponent()
-        cosine_outgoing = max(0.0, float(sampled.dot(normal)))
-        # The sampled Phong lobe has density (n+1)/(2*pi), while the
-        # reciprocal energy BRDF uses (n+2)/(2*pi) and the rendering
-        # equation contributes the surface cosine.  Retaining that ratio
-        # removes the former grazing-angle bias.
-        directional_weight = (
-            (exponent + 2.0) / (exponent + 1.0) * cosine_outgoing
-        )
         return (
-            sampled,
-            throughput * specular * directional_weight / probability,
+            self._sample_specular_lobe(direction, normal),
+            throughput * specular / probability,
             'SPECULAR',
         )
 
@@ -1007,6 +997,58 @@ class ReceiverPathTracer:
             progress(total, total)
         return events
 
+    def _stabilize_bidirectional_energy(
+        self,
+        endpoint_events: Sequence[AcousticEvent],
+        joined_events: Sequence[AcousticEvent],
+    ) -> None:
+        """Match each finite-sample MIS order to its endpoint energy moment.
+
+        Uniform MIS is unbiased asymptotically, but a difficult enclosure may
+        yield very few successful joined samples at practical path counts. In
+        that case the reliable endpoint estimators have already been divided
+        by strategies that did not converge, audibly shortening the decay.
+        The average of the independently sampled source and receiver endpoint
+        estimates supplies a stable per-band energy moment. Rescaling all MIS
+        events of the same order to that moment preserves the joined paths'
+        temporal and directional detail, approaches unity as sampling
+        converges, and cannot alter direct or deterministic early events.
+        """
+        endpoint_by_order = {}
+        combined_by_order = {}
+        events_by_order = {}
+        for event in endpoint_events:
+            endpoint_by_order.setdefault(
+                event.order, np.zeros(NUM_BANDS, dtype=np.float64)
+            )
+            endpoint_by_order[event.order] += event.energy_bands
+            combined_by_order.setdefault(
+                event.order, np.zeros(NUM_BANDS, dtype=np.float64)
+            )
+            combined_by_order[event.order] += event.energy_bands
+            events_by_order.setdefault(event.order, []).append(event)
+        for event in joined_events:
+            combined_by_order.setdefault(
+                event.order, np.zeros(NUM_BANDS, dtype=np.float64)
+            )
+            combined_by_order[event.order] += event.energy_bands
+            events_by_order.setdefault(event.order, []).append(event)
+
+        for order, endpoint_energy in endpoint_by_order.items():
+            strategy_count = float(self._mis_strategy_count(order))
+            reference_energy = endpoint_energy * strategy_count * 0.5
+            combined_energy = combined_by_order[order]
+            scale = np.ones(NUM_BANDS, dtype=np.float64)
+            valid = (
+                (reference_energy > 1e-20)
+                & (combined_energy > 1e-20)
+            )
+            scale[valid] = reference_energy[valid] / combined_energy[valid]
+            for event in events_by_order[order]:
+                event.energy_bands = (
+                    np.asarray(event.energy_bands, dtype=np.float64) * scale
+                ).astype(np.float32)
+
     def trace(
         self,
         source: mathutils.Vector,
@@ -1270,7 +1312,7 @@ class ReceiverPathTracer:
         # Every available split of a path is an independently unbiased
         # estimator. Equal sample counts therefore use a uniform MIS weight of
         # 1 / strategy_count for that reflection order.
-        events = self.trace(
+        endpoint_events = self.trace(
             source,
             receiver,
             progress,
@@ -1279,7 +1321,7 @@ class ReceiverPathTracer:
             progress_total=total,
             collect_subpaths=True,
         )
-        events.extend(self.trace_source(
+        endpoint_events.extend(self.trace_source(
             source,
             receiver,
             progress,
@@ -1288,11 +1330,16 @@ class ReceiverPathTracer:
             progress_total=total,
             collect_subpaths=True,
         ))
-        events.extend(self._connect_cached_subpaths(
+        joined_events = self._connect_cached_subpaths(
             progress,
             progress_offset=self.config.total_ray_count,
             progress_total=total,
-        ))
+        )
+        self._stabilize_bidirectional_energy(
+            endpoint_events, joined_events
+        )
+        events = endpoint_events
+        events.extend(joined_events)
         self._receiver_subpaths = []
         self._source_subpaths = []
         return events

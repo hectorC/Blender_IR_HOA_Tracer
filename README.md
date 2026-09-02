@@ -117,7 +117,10 @@ coupled spaces, but the number of attempted joins grows approximately with the
 square of the depth. Multiple-importance weighting is applied separately at
 every total reflection order, so enabling additional strategies does not
 intentionally multiply the reverberant level. Joined routes still obey Maximum
-Bounces as a total path-order limit.
+Bounces as a total path-order limit. At practical path counts, the source and
+listener endpoint estimates also provide a per-band energy reference for each
+order. This keeps a sparse set of successful joins from making the decay
+artificially shorter while retaining their timing and spatial information.
 
 **Specular Order** controls the deterministic image-source depth independently
 of stochastic render quality. Order 2 is the default balance. Order 3 improves
@@ -262,6 +265,7 @@ receiver, render settings, normalization gain, and event counts.
   represented.
 - Bidirectional subpaths are randomly paired one-to-one and use uniform
   order-wise MIS rather than a path-density balance or power heuristic. This
+  is stabilized against the average endpoint energy at each order and band. It
   improves difficult-path coverage while keeping render time and memory
   predictable, but it is not a general-purpose wave or spectral path tracer.
 - Diffraction is a bounded, single-edge approximation and is disabled by

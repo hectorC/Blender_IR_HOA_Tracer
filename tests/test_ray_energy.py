@@ -23,6 +23,7 @@ from ir_raytracer.core.ray_tracer import (  # noqa: E402
     ReceiverPathTracer,
     _PathVertex,
 )
+from ir_raytracer.core.synthesis import AcousticEvent  # noqa: E402
 from ir_raytracer.utils.scene_utils import AcousticScene  # noqa: E402
 
 
@@ -87,10 +88,7 @@ class RayEnergyTests(unittest.TestCase):
         _direction, diffuse_sample, _transmitted = tracer._sample_surface(
             direction, normal, material, throughput
         )
-        exponent = tracer._roughness_exponent()
-        unit_weight_cosine = (exponent + 1.0) / (exponent + 2.0)
-        specular_direction_draw = unit_weight_cosine ** (exponent + 1.0)
-        tracer.rng = SequenceRNG((0.5, specular_direction_draw, 0.5))
+        tracer.rng = SequenceRNG((0.5, 0.25, 0.5))
         _direction, specular_sample, _transmitted = tracer._sample_surface(
             direction, normal, material, throughput
         )
@@ -106,6 +104,57 @@ class RayEnergyTests(unittest.TestCase):
             + material.reflection_spectrum * material.specular_fraction
         )
         np.testing.assert_allclose(estimate, expected, rtol=1e-6, atol=1e-6)
+
+    def test_glossy_sampling_preserves_energy_at_grazing_incidence(self):
+        material = MaterialProperties(SimpleNamespace(
+            absorption_bands=(0.2,) * NUM_BANDS,
+            scatter_bands=(0.0,) * NUM_BANDS,
+            transmission=0.0,
+            transmission_bands=(0.0,) * NUM_BANDS,
+        ))
+        tracer = ReceiverPathTracer(_config(), AcousticScene(None, []))
+        normal = Vector((0.0, 0.0, 1.0))
+        throughputs = []
+        for direction in (
+            Vector((0.0, 0.0, -1.0)),
+            Vector((1.0, 0.0, -0.01)).normalized(),
+        ):
+            tracer.rng = SequenceRNG((0.5, 0.25, 0.5))
+            _direction, throughput, interaction = tracer._sample_surface(
+                direction, normal, material, np.ones(NUM_BANDS)
+            )
+            self.assertEqual(interaction, 'SPECULAR')
+            throughputs.append(throughput)
+
+        np.testing.assert_allclose(throughputs[0], throughputs[1])
+        np.testing.assert_allclose(
+            0.8 * throughputs[0], material.reflection_spectrum
+        )
+
+    def test_bidirectional_stabilization_restores_endpoint_energy_moment(self):
+        tracer = ReceiverPathTracer(
+            replace(_config(8), max_bounces=2), AcousticScene(None, [])
+        )
+
+        def event(energy):
+            return AcousticEvent(
+                delay_seconds=0.01,
+                arrival_direction=Vector((1.0, 0.0, 0.0)),
+                energy_bands=np.full(NUM_BANDS, energy, dtype=np.float32),
+                kind='DIFFUSE',
+                order=2,
+            )
+
+        endpoints = [event(1.0 / 3.0), event(1.0 / 3.0)]
+        joined = [event(0.03)]
+        tracer._stabilize_bidirectional_energy(endpoints, joined)
+
+        total = sum(
+            item.energy_bands for item in endpoints + joined
+        )
+        # Endpoint events carried 1/3 MIS weight. Their two unweighted
+        # estimates are both one, so the target average is one.
+        np.testing.assert_allclose(total, 1.0, rtol=1e-6)
 
     def test_reciprocal_endpoint_connections_have_matching_energy(self):
         material = MaterialProperties(SimpleNamespace(
