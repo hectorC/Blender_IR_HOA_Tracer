@@ -25,6 +25,7 @@ QUALITY_PROFILES = {
     'PREVIEW': {
         'airt_num_rays': 512,
         'airt_max_order': 24,
+        'airt_bidirectional_depth': 2,
         'airt_rr_start': 12,
         'airt_rr_p': 0.95,
         'airt_min_throughput': 1e-5,
@@ -32,6 +33,7 @@ QUALITY_PROFILES = {
     'BALANCED': {
         'airt_num_rays': 1024,
         'airt_max_order': 32,
+        'airt_bidirectional_depth': 4,
         'airt_rr_start': 20,
         'airt_rr_p': 0.97,
         'airt_min_throughput': 1e-6,
@@ -39,6 +41,7 @@ QUALITY_PROFILES = {
     'HIGH': {
         'airt_num_rays': 4096,
         'airt_max_order': 64,
+        'airt_bidirectional_depth': 6,
         'airt_rr_start': 32,
         'airt_rr_p': 0.98,
         'airt_min_throughput': 1e-6,
@@ -46,6 +49,7 @@ QUALITY_PROFILES = {
     'ULTRA': {
         'airt_num_rays': 16384,
         'airt_max_order': 128,
+        'airt_bidirectional_depth': 8,
         'airt_rr_start': 48,
         'airt_rr_p': 0.99,
         'airt_min_throughput': 1e-8,
@@ -475,10 +479,10 @@ def register_acoustic_props():
         update=_update_quality_profile,
     )
     scene.airt_num_rays = bpy.props.IntProperty(
-        name="Listener Rays",
+        name="Paths per Side",
         description=(
-            "How many directions are listened into from the receiver; more "
-            "rays make quiet reflections and the tail smoother, but take longer"
+            "How many directions are launched from each active endpoint; more "
+            "paths make quiet reflections and the tail smoother, but take longer"
         ),
         default=1024,
         min=128,
@@ -553,6 +557,15 @@ def register_acoustic_props():
         ),
         default=True,
     )
+    scene.airt_coherent_reflections = bpy.props.BoolProperty(
+        name="Pressure-Coherent Early Paths",
+        description=(
+            "Let distinct mirror-like echoes retain pressure polarity and "
+            "respond to the angle at which they meet each material; disable "
+            "for the older energy-only early-reflection sound"
+        ),
+        default=True,
+    )
     scene.airt_early_order = bpy.props.IntProperty(
         name="Specular Order",
         description=(
@@ -615,6 +628,28 @@ def register_acoustic_props():
         default=8.0,
         min=0.0,
         max=45.0,
+    )
+    scene.airt_bidirectional = bpy.props.BoolProperty(
+        name="Bidirectional Path Search",
+        description=(
+            "Listen outward from the receiver and project outward from the "
+            "source, then join the routes they discover without doubling "
+            "their level; this reveals difficult paths through openings and "
+            "between connected rooms"
+        ),
+        default=True,
+    )
+    scene.airt_bidirectional_depth = bpy.props.IntProperty(
+        name="Subpath Join Depth",
+        description=(
+            "Number of reflection points kept on each side for joining source "
+            "and listener routes; higher values can reveal longer coupled "
+            "paths, with a cost that grows quickly"
+        ),
+        default=4,
+        min=1,
+        max=16,
+        update=_mark_quality_custom,
     )
     scene.airt_rr_enable = bpy.props.BoolProperty(
         name="Russian Roulette",
@@ -846,6 +881,8 @@ def unregister_acoustic_props():
         'airt_source_object', 'airt_receiver_object', 'airt_quality_preset',
         'airt_num_rays', 'airt_max_order', 'airt_sr', 'airt_ir_seconds',
         'airt_output_content', 'airt_early_reflections', 'airt_early_order',
+        'airt_coherent_reflections', 'airt_bidirectional',
+        'airt_bidirectional_depth',
         'airt_early_path_budget', 'airt_early_gain_db', 'airt_diffuse_gain_db',
         'airt_seed', 'airt_spec_rough_deg',
         'airt_rr_enable', 'airt_rr_start', 'airt_rr_p', 'airt_min_throughput',

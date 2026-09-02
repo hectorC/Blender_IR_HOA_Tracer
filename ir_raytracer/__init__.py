@@ -3,12 +3,12 @@
 Ambisonic IR Tracer for Blender
 
 A Blender add-on that renders third-order ambisonic (ACN/SN3D) impulse responses
-from scene geometry using receiver-centric acoustic energy transport.
+from scene geometry using bidirectional acoustic transport.
 
 Features:
 - Third-order ambisonic encoding with configurable orientation offsets
 - Frequency-dependent source radiation using evaluated object orientation
-- Deterministic direct/early paths and stochastic diffuse transport
+- Coherent deterministic direct/early paths and bidirectional diffuse transport
 - Per-material acoustic assignments with frequency-dependent object fallbacks
 - Russian roulette termination and frequency-dependent air absorption
 - Optional bounded edge diffraction
@@ -20,7 +20,7 @@ bl_info = {
     "category": "Object",
     "author": "ChatGPT + Hector Centeno",
     "description": "Create artistic 3rd-order ambisonic IRs from Blender geometry and acoustic materials",
-    "version": (2, 1, 0),
+    "version": (2, 2, 0),
     "location": "3D Viewport > Sidebar > IR Tracer",
     "doc_url": "",
     "tracker_url": "",

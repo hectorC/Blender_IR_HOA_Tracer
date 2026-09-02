@@ -18,7 +18,7 @@ from .ambisonic import AmbisonicEncoder
 
 @dataclass
 class AcousticEvent:
-    """A time-, direction-, and frequency-resolved energy contribution."""
+    """A resolved arrival with energy and optional signed pressure transfer."""
 
     delay_seconds: float
     arrival_direction: mathutils.Vector
@@ -26,6 +26,7 @@ class AcousticEvent:
     kind: str
     order: int = 0
     pressure_sign_bands: np.ndarray | None = None
+    coherent_pressure_bands: np.ndarray | None = None
 
 
 @dataclass
@@ -33,6 +34,7 @@ class SynthesisStats:
     direct_events: int = 0
     early_events: int = 0
     diffuse_events: int = 0
+    coherent_events: int = 0
 
 
 def _gain_for_event(kind: str, early_gain: float, diffuse_gain: float) -> float:
@@ -105,8 +107,20 @@ def synthesize_ambisonic_ir(
         energy = np.maximum(np.asarray(event.energy_bands, dtype=np.float64), 0.0)
         if energy.shape != (NUM_BANDS,) or not np.any(energy > 1e-20):
             continue
-        pressure = np.sqrt(energy).astype(np.float32)
-        if event.pressure_sign_bands is not None:
+        coherent_pressure = event.coherent_pressure_bands
+        if coherent_pressure is not None:
+            pressure = np.asarray(
+                coherent_pressure, dtype=np.float32
+            ).copy()
+            if pressure.shape != (NUM_BANDS,):
+                continue
+            stats.coherent_events += 1
+        else:
+            pressure = np.sqrt(energy).astype(np.float32)
+        if (
+            coherent_pressure is None
+            and event.pressure_sign_bands is not None
+        ):
             signs = np.asarray(
                 event.pressure_sign_bands, dtype=np.float32
             )

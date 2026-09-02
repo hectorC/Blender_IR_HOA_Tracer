@@ -66,7 +66,25 @@ class AcousticRenderConfig:
     source_directivity: SourceDirectivity = field(
         default_factory=SourceDirectivity
     )
+    coherent_reflections: bool = True
+    bidirectional_enabled: bool = True
+    bidirectional_depth: int = 4
     eps: float = 1e-4
+
+    @property
+    def total_ray_count(self) -> int:
+        """Return the total stochastic paths launched by this render."""
+        return self.ray_count * (2 if self.bidirectional_enabled else 1)
+
+    @property
+    def progress_work_units(self) -> int:
+        """Estimate ray launches plus bounded bidirectional join attempts."""
+        if not self.bidirectional_enabled:
+            return self.ray_count
+        return (
+            self.total_ray_count
+            + self.ray_count * self.bidirectional_depth ** 2
+        )
 
     @classmethod
     def from_context(cls, context) -> "AcousticRenderConfig":
@@ -142,14 +160,27 @@ class AcousticRenderConfig:
                     else None
                 ),
             ),
+            coherent_reflections=bool(
+                getattr(scene, 'airt_coherent_reflections', True)
+            ),
+            bidirectional_enabled=bool(
+                getattr(scene, 'airt_bidirectional', True)
+            ),
+            bidirectional_depth=int(np.clip(
+                getattr(scene, 'airt_bidirectional_depth', 4), 1, 16
+            )),
         )
 
 
 @dataclass
 class TransportStats:
     rays_traced: int = 0
+    receiver_rays_traced: int = 0
+    source_rays_traced: int = 0
     surface_interactions: int = 0
     source_connections: int = 0
+    receiver_connections: int = 0
+    subpath_connections: int = 0
     direct_events: int = 0
     early_events: int = 0
     diffraction_events: int = 0
@@ -172,6 +203,21 @@ class _EarlyPathCandidate:
 
     event: AcousticEvent
     surface_id: object
+
+
+@dataclass
+class _PathVertex:
+    """Detached state at one source- or receiver-launched surface hit."""
+
+    point: mathutils.Vector
+    normal: mathutils.Vector
+    incoming_direction: mathutils.Vector
+    path_distance_bu: float
+    throughput: np.ndarray
+    material: MaterialProperties
+    all_prior_specular: bool
+    arrival_direction: Optional[mathutils.Vector] = None
+    source_polarity: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -337,6 +383,32 @@ def _cluster_unresolved_early_paths(
         strongest_signs = signs[
             strongest_indices, np.arange(NUM_BANDS)
         ]
+        strongest_pressures = None
+        if any(
+            candidate.event.coherent_pressure_bands is not None
+            for candidate in cluster
+        ):
+            coherent_pressures = []
+            for candidate in cluster:
+                pressure = candidate.event.coherent_pressure_bands
+                if pressure is None:
+                    pressure = (
+                        np.sqrt(np.maximum(
+                            candidate.event.energy_bands, 0.0
+                        ))
+                        * (
+                            candidate.event.pressure_sign_bands
+                            if candidate.event.pressure_sign_bands is not None
+                            else 1.0
+                        )
+                    )
+                coherent_pressures.append(
+                    np.asarray(pressure, dtype=np.float32)
+                )
+            coherent_pressures = np.stack(coherent_pressures)
+            strongest_pressures = coherent_pressures[
+                strongest_indices, np.arange(NUM_BANDS)
+            ]
         weights = np.maximum(np.mean(energies, axis=1), 1e-20)
         delay = float(np.average(
             [candidate.event.delay_seconds for candidate in cluster],
@@ -356,6 +428,7 @@ def _cluster_unresolved_early_paths(
             kind='EARLY',
             order=cluster[0].event.order,
             pressure_sign_bands=strongest_signs,
+            coherent_pressure_bands=strongest_pressures,
         ))
     return events
 
@@ -370,6 +443,28 @@ class ReceiverPathTracer:
         self.rng = np.random.default_rng(config.seed if config.seed != 0 else None)
         self._material_cache = {}
         self.deterministic_specular_order = 0
+        self._receiver_subpaths: List[List[_PathVertex]] = []
+        self._source_subpaths: List[List[_PathVertex]] = []
+
+    def _mis_strategy_count(self, order: int) -> int:
+        """Count endpoint and available intermediate splits for one order."""
+        if not self.config.bidirectional_enabled:
+            return 1
+        order = max(1, int(order))
+        depth = max(1, int(self.config.bidirectional_depth))
+        first_source_order = max(1, order - depth)
+        last_source_order = min(depth, order - 1)
+        intermediate = max(
+            0, last_source_order - first_source_order + 1
+        )
+        return 2 + intermediate
+
+    def _endpoint_mis_weight(
+        self, order: int, strategy_weight: Optional[float]
+    ) -> float:
+        if strategy_weight is not None:
+            return float(strategy_weight)
+        return 1.0 / float(self._mis_strategy_count(order))
 
     def material_for_face(self, face_index: int) -> MaterialProperties:
         """Return one immutable coefficient snapshot per assignment owner."""
@@ -394,6 +489,16 @@ class ReceiverPathTracer:
             self.config.air_pressure_kpa,
         )
         return pressure_gain * pressure_gain
+
+    def _air_pressure(self, distance_bu: float) -> np.ndarray:
+        if not self.config.air_enabled:
+            return np.ones(NUM_BANDS, dtype=np.float32)
+        return air_attenuation_bands(
+            distance_bu * self.config.unit_scale,
+            self.config.air_temperature_c,
+            self.config.air_humidity_pct,
+            self.config.air_pressure_kpa,
+        )
 
     def _directions(self) -> List[mathutils.Vector]:
         count = self.config.ray_count
@@ -532,9 +637,19 @@ class ReceiverPathTracer:
                 'DIFFUSE',
             )
         probability = max(float(probabilities[2]), 1e-12)
+        sampled = self._sample_specular_lobe(direction, normal)
+        exponent = self._roughness_exponent()
+        cosine_outgoing = max(0.0, float(sampled.dot(normal)))
+        # The sampled Phong lobe has density (n+1)/(2*pi), while the
+        # reciprocal energy BRDF uses (n+2)/(2*pi) and the rendering
+        # equation contributes the surface cosine.  Retaining that ratio
+        # removes the former grazing-angle bias.
+        directional_weight = (
+            (exponent + 2.0) / (exponent + 1.0) * cosine_outgoing
+        )
         return (
-            self._sample_specular_lobe(direction, normal),
-            throughput * specular / probability,
+            sampled,
+            throughput * specular * directional_weight / probability,
             'SPECULAR',
         )
 
@@ -550,6 +665,7 @@ class ReceiverPathTracer:
         first_direction: mathutils.Vector,
         bounce: int,
         all_prior_specular: bool = True,
+        strategy_weight: Optional[float] = 1.0,
     ) -> Optional[AcousticEvent]:
         to_source = source - hit_point
         source_distance_bu = to_source.length
@@ -590,6 +706,9 @@ class ReceiverPathTracer:
         )
         total_distance_bu = path_distance_bu + source_distance_bu
         angular_sample_weight = 4.0 * pi / float(self.config.ray_count)
+        mis_weight = self._endpoint_mis_weight(
+            bounce + 1, strategy_weight
+        )
         source_energy_gain, source_polarity = (
             self.config.source_directivity.energy_gain_and_polarity(
                 -source_direction
@@ -602,6 +721,7 @@ class ReceiverPathTracer:
             * cosine_incident
             * angular_sample_weight
             * source_energy_gain
+            * mis_weight
             / (source_distance_m * source_distance_m)
             * self._air_energy(total_distance_bu)
         )
@@ -617,27 +737,307 @@ class ReceiverPathTracer:
             pressure_sign_bands=source_polarity,
         )
 
+    def _receiver_connection(
+        self,
+        hit_point: mathutils.Vector,
+        normal: mathutils.Vector,
+        incoming_direction: mathutils.Vector,
+        receiver: mathutils.Vector,
+        path_distance_bu: float,
+        throughput: np.ndarray,
+        material: MaterialProperties,
+        source_polarity: np.ndarray,
+        bounce: int,
+        all_prior_specular: bool = True,
+        strategy_weight: Optional[float] = 1.0,
+    ) -> Optional[AcousticEvent]:
+        """Connect a source-launched subpath to the point receiver."""
+        to_receiver = receiver - hit_point
+        receiver_distance_bu = to_receiver.length
+        if receiver_distance_bu <= self.config.eps:
+            return None
+        receiver_direction = to_receiver / receiver_distance_bu
+        cosine_outgoing = max(0.0, float(normal.dot(receiver_direction)))
+        if cosine_outgoing <= 1e-8:
+            return None
+
+        visibility = spectral_visibility(
+            hit_point + normal * (self.config.eps * 4.0),
+            receiver,
+            self.scene,
+            self.config.eps,
+        )
+        if not np.any(visibility > 1e-10):
+            return None
+
+        deterministic_covers_connection = (
+            self.config.early_reflections
+            and self.config.output_content != 'DIFFUSE'
+            and bounce + 1 <= self.deterministic_specular_order
+            and all_prior_specular
+        )
+        brdf = self._connection_brdf(
+            material,
+            normal,
+            -incoming_direction,
+            receiver_direction,
+            include_specular=not deterministic_covers_connection,
+        )
+        if not np.any(brdf > 1e-12):
+            return None
+
+        receiver_distance_m = max(
+            receiver_distance_bu * self.config.unit_scale,
+            self.config.eps,
+        )
+        total_distance_bu = path_distance_bu + receiver_distance_bu
+        angular_sample_weight = 4.0 * pi / float(self.config.ray_count)
+        mis_weight = self._endpoint_mis_weight(
+            bounce + 1, strategy_weight
+        )
+        energy = (
+            throughput
+            * visibility
+            * brdf
+            * cosine_outgoing
+            * angular_sample_weight
+            * mis_weight
+            / (receiver_distance_m * receiver_distance_m)
+            * self._air_energy(total_distance_bu)
+        )
+        if not np.any(energy > 1e-16):
+            return None
+        self.stats.receiver_connections += 1
+        return AcousticEvent(
+            delay_seconds=total_distance_bu / self.config.speed_of_sound_bu,
+            arrival_direction=(hit_point - receiver).normalized(),
+            energy_bands=energy.astype(np.float32),
+            kind='DIFFUSE',
+            order=bounce + 1,
+            pressure_sign_bands=source_polarity.copy(),
+        )
+
+    def _connect_subpath_vertices(
+        self,
+        source_vertex: _PathVertex,
+        receiver_vertex: _PathVertex,
+        source_order: int,
+        receiver_order: int,
+    ) -> Optional[AcousticEvent]:
+        """Join independently sampled surface subpaths with uniform MIS."""
+        connection = receiver_vertex.point - source_vertex.point
+        connection_distance_bu = connection.length
+        if connection_distance_bu <= self.config.eps:
+            return None
+        connection_direction = connection / connection_distance_bu
+        source_cosine = max(
+            0.0, float(source_vertex.normal.dot(connection_direction))
+        )
+        receiver_cosine = max(
+            0.0, float(receiver_vertex.normal.dot(-connection_direction))
+        )
+        if source_cosine <= 1e-8 or receiver_cosine <= 1e-8:
+            return None
+
+        visibility = spectral_visibility(
+            source_vertex.point,
+            receiver_vertex.point,
+            self.scene,
+            self.config.eps,
+        )
+        if not np.any(visibility > 1e-10):
+            return None
+
+        source_full_brdf = self._connection_brdf(
+            source_vertex.material,
+            source_vertex.normal,
+            -source_vertex.incoming_direction,
+            connection_direction,
+            include_specular=True,
+        )
+        receiver_full_brdf = self._connection_brdf(
+            receiver_vertex.material,
+            receiver_vertex.normal,
+            -connection_direction,
+            -receiver_vertex.incoming_direction,
+            include_specular=True,
+        )
+        brdf_product = source_full_brdf * receiver_full_brdf
+        order = source_order + receiver_order
+        if order > self.config.max_bounces:
+            return None
+        deterministic_covers_specular = (
+            self.config.early_reflections
+            and self.config.output_content != 'DIFFUSE'
+            and order <= self.deterministic_specular_order
+            and source_vertex.all_prior_specular
+            and receiver_vertex.all_prior_specular
+        )
+        if deterministic_covers_specular:
+            # The image-source stage already contains the combination in which
+            # both connection vertices scatter specularly.  Retain diffuse and
+            # mixed diffuse/specular combinations without counting that route
+            # twice.
+            source_diffuse_brdf = self._connection_brdf(
+                source_vertex.material,
+                source_vertex.normal,
+                -source_vertex.incoming_direction,
+                connection_direction,
+                include_specular=False,
+            )
+            receiver_diffuse_brdf = self._connection_brdf(
+                receiver_vertex.material,
+                receiver_vertex.normal,
+                -connection_direction,
+                -receiver_vertex.incoming_direction,
+                include_specular=False,
+            )
+            source_specular_brdf = np.maximum(
+                source_full_brdf - source_diffuse_brdf, 0.0
+            )
+            receiver_specular_brdf = np.maximum(
+                receiver_full_brdf - receiver_diffuse_brdf, 0.0
+            )
+            brdf_product = np.maximum(
+                brdf_product
+                - source_specular_brdf * receiver_specular_brdf,
+                0.0,
+            )
+        if not np.any(brdf_product > 1e-12):
+            return None
+
+        total_distance_bu = (
+            source_vertex.path_distance_bu
+            + connection_distance_bu
+            + receiver_vertex.path_distance_bu
+        )
+        if (
+            total_distance_bu / self.config.speed_of_sound_bu
+            >= self.config.duration_seconds
+        ):
+            return None
+        connection_distance_m = max(
+            connection_distance_bu * self.config.unit_scale,
+            self.config.eps,
+        )
+        # One source/receiver vertex pair is a joint Monte Carlo sample.  Both
+        # initial directions are uniform on the sphere, so their reciprocal
+        # densities contribute (4*pi)^2.  Surface-direction PDFs have already
+        # been divided out in each stored throughput.
+        joint_sample_weight = (
+            (4.0 * pi) ** 2 / float(self.config.ray_count)
+        )
+        mis_weight = 1.0 / float(self._mis_strategy_count(order))
+        energy = (
+            source_vertex.throughput
+            * receiver_vertex.throughput
+            * visibility
+            * brdf_product
+            * source_cosine
+            * receiver_cosine
+            * joint_sample_weight
+            * mis_weight
+            / (connection_distance_m * connection_distance_m)
+            * self._air_energy(total_distance_bu)
+        )
+        if not np.any(energy > 1e-16):
+            return None
+        if (
+            receiver_vertex.arrival_direction is None
+            or source_vertex.source_polarity is None
+        ):
+            return None
+        self.stats.subpath_connections += 1
+        return AcousticEvent(
+            delay_seconds=total_distance_bu / self.config.speed_of_sound_bu,
+            arrival_direction=receiver_vertex.arrival_direction.copy(),
+            energy_bands=energy.astype(np.float32),
+            kind='DIFFUSE',
+            order=order,
+            pressure_sign_bands=source_vertex.source_polarity.copy(),
+        )
+
+    def _connect_cached_subpaths(
+        self,
+        progress: Optional[Callable[[int, int], None]] = None,
+        progress_offset: int = 0,
+        progress_total: Optional[int] = None,
+    ) -> List[AcousticEvent]:
+        """Connect randomly paired source/receiver samples at every split."""
+        events: List[AcousticEvent] = []
+        total = progress_total or self.config.progress_work_units
+        pair_count = min(
+            len(self._source_subpaths), len(self._receiver_subpaths)
+        )
+        if pair_count <= 0:
+            if progress:
+                progress(total, total)
+            return events
+        # The two launchers use rotated Fibonacci spheres. Pairing equal list
+        # indices would correlate those low-discrepancy patterns and bias the
+        # joint estimator. A seeded random permutation retains their even
+        # marginal coverage while providing joint source/receiver samples.
+        source_indices = self.rng.permutation(pair_count)
+        join_units_per_pair = self.config.bidirectional_depth ** 2
+        for path_index, shuffled_source_index in enumerate(source_indices):
+            if progress and path_index % 16 == 0:
+                progress(
+                    progress_offset + path_index * join_units_per_pair,
+                    total,
+                )
+            source_vertices = self._source_subpaths[
+                int(shuffled_source_index)
+            ]
+            receiver_vertices = self._receiver_subpaths[path_index]
+            for source_depth_index, source_vertex in enumerate(
+                source_vertices
+            ):
+                for receiver_depth_index, receiver_vertex in enumerate(
+                    receiver_vertices
+                ):
+                    event = self._connect_subpath_vertices(
+                        source_vertex,
+                        receiver_vertex,
+                        source_depth_index + 1,
+                        receiver_depth_index + 1,
+                    )
+                    if event is not None:
+                        events.append(event)
+        if progress:
+            progress(total, total)
+        return events
+
     def trace(
         self,
         source: mathutils.Vector,
         receiver: mathutils.Vector,
         progress: Optional[Callable[[int, int], None]] = None,
+        strategy_weight: Optional[float] = 1.0,
+        progress_offset: int = 0,
+        progress_total: Optional[int] = None,
+        collect_subpaths: bool = False,
     ) -> List[AcousticEvent]:
+        """Trace receiver-launched paths and connect them to the source."""
         events: List[AcousticEvent] = []
         bvh = self.scene.bvh
+        total = progress_total or self.config.ray_count
         if bvh is None or self.config.max_bounces <= 0:
+            if progress:
+                progress(progress_offset + self.config.ray_count, total)
             return events
 
         for ray_index, initial_direction in enumerate(self._directions()):
             if progress and ray_index % 64 == 0:
-                progress(ray_index, self.config.ray_count)
+                progress(progress_offset + ray_index, total)
             self.stats.rays_traced += 1
+            self.stats.receiver_rays_traced += 1
             first_direction = initial_direction.copy()
             direction = initial_direction.copy()
             position = receiver.copy()
             throughput = np.ones(NUM_BANDS, dtype=np.float64)
             path_distance_bu = 0.0
             all_prior_specular = True
+            vertices: List[_PathVertex] = []
 
             for bounce in range(self.config.max_bounces):
                 hit, normal, face_index, hit_distance = bvh.ray_cast(
@@ -658,6 +1058,19 @@ class ReceiverPathTracer:
 
                 self.stats.surface_interactions += 1
                 material = self.material_for_face(face_index)
+                if collect_subpaths and bounce < self.config.bidirectional_depth:
+                    vertices.append(_PathVertex(
+                        point=hit_point.copy(),
+                        normal=normal.copy(),
+                        incoming_direction=direction.copy(),
+                        path_distance_bu=path_distance_bu,
+                        throughput=np.asarray(
+                            throughput, dtype=np.float64
+                        ).copy(),
+                        material=material,
+                        all_prior_specular=all_prior_specular,
+                        arrival_direction=first_direction.copy(),
+                    ))
                 event = self._source_connection(
                     hit_point,
                     normal,
@@ -669,6 +1082,7 @@ class ReceiverPathTracer:
                     first_direction,
                     bounce,
                     all_prior_specular,
+                    strategy_weight,
                 )
                 if event is not None and event.delay_seconds < self.config.duration_seconds:
                     events.append(event)
@@ -700,8 +1114,187 @@ class ReceiverPathTracer:
                         + direction * (self.config.eps * 2.0)
                     )
 
+            if collect_subpaths:
+                self._receiver_subpaths.append(vertices)
+
         if progress:
-            progress(self.config.ray_count, self.config.ray_count)
+            progress(progress_offset + self.config.ray_count, total)
+        return events
+
+    def trace_source(
+        self,
+        source: mathutils.Vector,
+        receiver: mathutils.Vector,
+        progress: Optional[Callable[[int, int], None]] = None,
+        strategy_weight: Optional[float] = 1.0,
+        progress_offset: int = 0,
+        progress_total: Optional[int] = None,
+        collect_subpaths: bool = False,
+    ) -> List[AcousticEvent]:
+        """Trace source-launched paths and connect them to the receiver."""
+        events: List[AcousticEvent] = []
+        bvh = self.scene.bvh
+        total = progress_total or self.config.ray_count
+        if bvh is None or self.config.max_bounces <= 0:
+            if progress:
+                progress(progress_offset + self.config.ray_count, total)
+            return events
+
+        for ray_index, initial_direction in enumerate(self._directions()):
+            if progress and ray_index % 64 == 0:
+                progress(progress_offset + ray_index, total)
+            self.stats.rays_traced += 1
+            self.stats.source_rays_traced += 1
+            direction = initial_direction.copy()
+            position = source.copy()
+            source_energy, source_polarity = (
+                self.config.source_directivity.energy_gain_and_polarity(
+                    initial_direction
+                )
+            )
+            throughput = source_energy.astype(np.float64)
+            vertices: List[_PathVertex] = []
+            if float(np.max(throughput)) <= 1e-20:
+                if collect_subpaths:
+                    self._source_subpaths.append(vertices)
+                continue
+            path_distance_bu = 0.0
+            all_prior_specular = True
+
+            for bounce in range(self.config.max_bounces):
+                hit, normal, face_index, hit_distance = bvh.ray_cast(
+                    position + direction * self.config.eps, direction
+                )
+                if hit is None or normal is None or face_index is None:
+                    break
+                if not (0 <= face_index < len(self.scene.faces)):
+                    break
+
+                hit_point = mathutils.Vector(hit)
+                normal = mathutils.Vector(normal).normalized()
+                if normal.dot(direction) > 0.0:
+                    normal = -normal
+                path_distance_bu += float(hit_distance)
+                if (
+                    path_distance_bu / self.config.speed_of_sound_bu
+                    >= self.config.duration_seconds
+                ):
+                    break
+
+                self.stats.surface_interactions += 1
+                material = self.material_for_face(face_index)
+                if collect_subpaths and bounce < self.config.bidirectional_depth:
+                    vertices.append(_PathVertex(
+                        point=hit_point.copy(),
+                        normal=normal.copy(),
+                        incoming_direction=direction.copy(),
+                        path_distance_bu=path_distance_bu,
+                        throughput=np.asarray(
+                            throughput, dtype=np.float64
+                        ).copy(),
+                        material=material,
+                        all_prior_specular=all_prior_specular,
+                        source_polarity=source_polarity.copy(),
+                    ))
+                event = self._receiver_connection(
+                    hit_point,
+                    normal,
+                    direction,
+                    receiver,
+                    path_distance_bu,
+                    throughput,
+                    material,
+                    source_polarity,
+                    bounce,
+                    all_prior_specular,
+                    strategy_weight,
+                )
+                if (
+                    event is not None
+                    and event.delay_seconds < self.config.duration_seconds
+                ):
+                    events.append(event)
+
+                new_direction, new_throughput, interaction = (
+                    self._sample_surface(
+                        direction, normal, material, throughput
+                    )
+                )
+                if new_direction is None or new_throughput is None:
+                    break
+                all_prior_specular = (
+                    all_prior_specular and interaction == 'SPECULAR'
+                )
+                throughput = new_throughput
+                if float(np.max(throughput)) < self.config.min_energy:
+                    break
+
+                if (
+                    self.config.rr_enabled
+                    and bounce + 1 >= self.config.rr_start
+                ):
+                    if float(self.rng.random()) > self.config.rr_survival:
+                        break
+                    throughput /= self.config.rr_survival
+
+                direction = new_direction.normalized()
+                if interaction == 'TRANSMISSION':
+                    position = hit_point + direction * (self.config.eps * 4.0)
+                else:
+                    position = (
+                        hit_point
+                        + normal * (self.config.eps * 2.0)
+                        + direction * (self.config.eps * 2.0)
+                    )
+
+            if collect_subpaths:
+                self._source_subpaths.append(vertices)
+
+        if progress:
+            progress(progress_offset + self.config.ray_count, total)
+        return events
+
+    def trace_bidirectional(
+        self,
+        source: mathutils.Vector,
+        receiver: mathutils.Vector,
+        progress: Optional[Callable[[int, int], None]] = None,
+    ) -> List[AcousticEvent]:
+        """Join source and receiver subpaths with order-wise uniform MIS."""
+        if not self.config.bidirectional_enabled:
+            return self.trace(source, receiver, progress)
+
+        total = self.config.progress_work_units
+        self._receiver_subpaths = []
+        self._source_subpaths = []
+        # Every available split of a path is an independently unbiased
+        # estimator. Equal sample counts therefore use a uniform MIS weight of
+        # 1 / strategy_count for that reflection order.
+        events = self.trace(
+            source,
+            receiver,
+            progress,
+            strategy_weight=None,
+            progress_offset=0,
+            progress_total=total,
+            collect_subpaths=True,
+        )
+        events.extend(self.trace_source(
+            source,
+            receiver,
+            progress,
+            strategy_weight=None,
+            progress_offset=self.config.ray_count,
+            progress_total=total,
+            collect_subpaths=True,
+        ))
+        events.extend(self._connect_cached_subpaths(
+            progress,
+            progress_offset=self.config.total_ray_count,
+            progress_total=total,
+        ))
+        self._receiver_subpaths = []
+        self._source_subpaths = []
         return events
 
 
@@ -749,17 +1342,16 @@ class AmbisonicIREngine:
         if np.any(visibility > 1e-10):
             if self.config.output_content == 'FULL':
                 distance_m = distance_bu * self.config.unit_scale
-                source_energy_gain, source_polarity = (
-                    self.config.source_directivity.energy_gain_and_polarity(
-                        -direction
-                    )
+                source_pressure = (
+                    self.config.source_directivity.pressure_gain(-direction)
                 )
-                energy = (
-                    visibility
-                    * source_energy_gain
-                    * self._air_energy(distance_bu)
-                    / max(distance_m * distance_m, 1e-12)
-                )
+                coherent_pressure = (
+                    np.sqrt(np.maximum(visibility, 0.0))
+                    * source_pressure
+                    * self.tracer._air_pressure(distance_bu)
+                    / max(distance_m, 1e-6)
+                ).astype(np.float32)
+                energy = np.square(coherent_pressure)
                 if np.any(energy > 1e-16):
                     events.append(AcousticEvent(
                         delay_seconds=(
@@ -769,7 +1361,10 @@ class AmbisonicIREngine:
                         energy_bands=energy.astype(np.float32),
                         kind='DIRECT',
                         order=0,
-                        pressure_sign_bands=source_polarity,
+                        pressure_sign_bands=np.where(
+                            coherent_pressure < 0.0, -1.0, 1.0
+                        ).astype(np.float32),
+                        coherent_pressure_bands=coherent_pressure,
                     ))
                     self.tracer.stats.direct_events += 1
             return events
@@ -1001,28 +1596,64 @@ class AmbisonicIREngine:
                     continue
                 seen.add(key)
 
+                coherent_reflection = np.ones(
+                    NUM_BANDS, dtype=np.float64
+                )
                 specular_energy = np.ones(NUM_BANDS, dtype=np.float64)
-                for face_index in reflection_faces:
+                for path_index, face_index in enumerate(reflection_faces):
                     material = self.tracer.material_for_face(face_index)
                     specular_energy *= (
                         material.reflection_spectrum * material.specular_fraction
+                    )
+                    previous_point = (
+                        source
+                        if path_index == 0
+                        else reflection_points[path_index - 1]
+                    )
+                    incoming = (
+                        reflection_points[path_index] - previous_point
+                    ).normalized()
+                    incidence_cosine = abs(float(
+                        incoming.dot(self.scene.faces[face_index].normal)
+                    ))
+                    coherent_reflection *= (
+                        material.specular_pressure_spectrum(incidence_cosine)
                     )
                 if not np.any(specular_energy > 1e-12):
                     continue
 
                 distance_m = total_distance_bu * self.config.unit_scale
-                source_energy_gain, source_polarity = (
-                    self.config.source_directivity.energy_gain_and_polarity(
+                source_pressure = (
+                    self.config.source_directivity.pressure_gain(
                         reflection_points[0] - source
                     )
                 )
-                energy = (
-                    specular_energy
-                    * visibility
-                    * source_energy_gain
-                    * self._air_energy(total_distance_bu)
-                    / max(distance_m * distance_m, 1e-12)
-                )
+                if self.config.coherent_reflections:
+                    coherent_pressure = (
+                        coherent_reflection
+                        * np.sqrt(np.maximum(visibility, 0.0))
+                        * source_pressure
+                        * self.tracer._air_pressure(total_distance_bu)
+                        / max(distance_m, 1e-6)
+                    ).astype(np.float32)
+                    energy = np.square(coherent_pressure)
+                else:
+                    source_energy_gain = np.square(source_pressure)
+                    coherent_pressure = None
+                    energy = (
+                        specular_energy
+                        * visibility
+                        * source_energy_gain
+                        * self._air_energy(total_distance_bu)
+                        / max(distance_m * distance_m, 1e-12)
+                    )
+                source_polarity = np.where(
+                    source_pressure < 0.0, -1.0, 1.0
+                ).astype(np.float32)
+                if coherent_pressure is not None:
+                    source_polarity = np.where(
+                        coherent_pressure < 0.0, -1.0, 1.0
+                    ).astype(np.float32)
                 if not np.any(energy > 1e-16):
                     continue
                 candidates.append(_EarlyPathCandidate(
@@ -1037,6 +1668,7 @@ class AmbisonicIREngine:
                         kind='EARLY',
                         order=order,
                         pressure_sign_bands=source_polarity,
+                        coherent_pressure_bands=coherent_pressure,
                     ),
                     surface_id=tuple(
                         id(surfaces[index].object_ref) for index in sequence
@@ -1063,7 +1695,9 @@ class AmbisonicIREngine:
     ) -> AcousticRenderResult:
         events = self._direct_or_diffraction_events(source, receiver)
         events.extend(self._deterministic_specular_events(source, receiver))
-        events.extend(self.tracer.trace(source, receiver, progress))
+        events.extend(
+            self.tracer.trace_bidirectional(source, receiver, progress)
+        )
         ir, synthesis_stats = synthesize_ambisonic_ir(
             events,
             self.config.sample_rate,

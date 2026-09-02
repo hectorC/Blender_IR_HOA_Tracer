@@ -191,11 +191,34 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
             "content": scene.airt_output_content,
             "quality": scene.airt_quality_preset,
             "listener_rays": config.ray_count,
+            "source_rays": (
+                config.ray_count if config.bidirectional_enabled else 0
+            ),
+            "total_stochastic_paths": config.total_ray_count,
+            "transport_strategy": {
+                "bidirectional": config.bidirectional_enabled,
+                "subpath_join_depth": (
+                    config.bidirectional_depth
+                    if config.bidirectional_enabled
+                    else 0
+                ),
+                "combination": (
+                    "orderwise_uniform_mis"
+                    if config.bidirectional_enabled
+                    else "receiver_launched"
+                ),
+            },
             "maximum_bounces": config.max_bounces,
             "seed": config.seed,
             "scene_unit_scale_metres": config.unit_scale,
             "speed_of_sound_bu_per_second": config.speed_of_sound_bu,
             "deterministic_early_reflections": config.early_reflections,
+            "pressure_coherent_early_paths": config.coherent_reflections,
+            "coherent_boundary_model": (
+                "locally_reacting_resistive_inferred_from_absorption"
+                if config.coherent_reflections
+                else "disabled"
+            ),
             "deterministic_reflection_order": config.early_order,
             "deterministic_path_budget": config.early_path_budget,
             "early_gain_db": config.early_gain_db,
@@ -265,6 +288,20 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
                     "direct": result.synthesis.direct_events,
                     "early": result.synthesis.early_events,
                     "diffuse": result.synthesis.diffuse_events,
+                    "pressure_coherent": result.synthesis.coherent_events,
+                },
+                "stochastic_path_stats": {
+                    "receiver_paths": result.transport.receiver_rays_traced,
+                    "source_paths": result.transport.source_rays_traced,
+                    "connections_to_source": (
+                        result.transport.source_connections
+                    ),
+                    "connections_to_receiver": (
+                        result.transport.receiver_connections
+                    ),
+                    "joined_subpath_connections": (
+                        result.transport.subpath_connections
+                    ),
                 },
                 "deterministic_path_stats": {
                     "surface_sequences_tested": (
@@ -318,7 +355,9 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
         if request is None:
             return {'CANCELLED'}
         window_manager = context.window_manager
-        window_manager.progress_begin(0, request.engine.config.ray_count)
+        window_manager.progress_begin(
+            0, request.engine.config.progress_work_units
+        )
 
         def update_progress(done, total):
             window_manager.progress_update(min(done, total))
@@ -347,12 +386,12 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
         self._background_result = None
         self._background_error = None
         self._background_traceback = None
-        self._progress = (0, request.engine.config.ray_count)
+        self._progress = (0, request.engine.config.progress_work_units)
         self._timer = context.window_manager.event_timer_add(
             0.1, window=context.window
         )
         context.window_manager.progress_begin(
-            0, request.engine.config.ray_count
+            0, request.engine.config.progress_work_units
         )
         type(self)._is_running = True
 
@@ -389,7 +428,7 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
 
         done, total = self._progress
         if total > 0:
-            request_total = self._request.engine.config.ray_count
+            request_total = self._request.engine.config.progress_work_units
             scaled = int(
                 request_total * min(max(done / total, 0.0), 1.0)
             )

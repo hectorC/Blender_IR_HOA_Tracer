@@ -69,6 +69,23 @@ class SynthesisTests(unittest.TestCase):
         )
         np.testing.assert_allclose(negative_ir, -positive_ir, atol=1e-7)
 
+    def test_coherent_pressure_transfer_is_authoritative(self):
+        event = AcousticEvent(
+            delay_seconds=0.01,
+            arrival_direction=Vector((1.0, 0.0, 0.0)),
+            energy_bands=np.full(NUM_BANDS, 0.81, dtype=np.float32),
+            kind='EARLY',
+            coherent_pressure_bands=np.full(
+                NUM_BANDS, -0.2, dtype=np.float32
+            ),
+        )
+        ir, stats = synthesize_ambisonic_ir(
+            [event], 48000, 0.05, AmbisonicEncoder()
+        )
+
+        self.assertEqual(stats.coherent_events, 1)
+        self.assertAlmostEqual(float(ir[0, 480]), -0.2, places=5)
+
     def test_diffuse_phase_is_repeatable_for_a_seed(self):
         events = [
             AcousticEvent(

@@ -63,6 +63,9 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
         scene.airt_enable_diffraction = False
         scene.airt_early_reflections = True
         scene.airt_early_order = 2
+        scene.airt_coherent_reflections = True
+        scene.airt_bidirectional = True
+        scene.airt_bidirectional_depth = 4
         scene.airt_use_receiver_orientation = True
 
     def _endpoint(self, name, location, source=False):
@@ -136,6 +139,9 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
         self.assertEqual(full.transport.direct_events, 1)
         self.assertGreater(full.transport.early_events, 0)
         self.assertGreater(full.synthesis.diffuse_events, 0)
+        self.assertEqual(full.transport.receiver_rays_traced, 128)
+        self.assertEqual(full.transport.source_rays_traced, 128)
+        self.assertGreater(full.transport.subpath_connections, 0)
         self.assertEqual(wet.transport.direct_events, 0)
         self.assertGreater(wet.transport.early_events, 0)
         self.assertGreater(wet.synthesis.diffuse_events, 0)
@@ -152,6 +158,49 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
         first = self._render('FULL')
         second = self._render('FULL')
         np.testing.assert_array_equal(first.ir, second.ir)
+
+    def test_bidirectional_search_can_fall_back_to_receiver_only(self):
+        self._room()
+        self._endpoint("Source", (-1.0, 0.0, 0.0), source=True)
+        self._endpoint("Receiver", (1.0, 0.5, 0.0))
+        bpy.context.scene.airt_bidirectional = False
+
+        result = self._render('DIFFUSE')
+
+        self.assertEqual(result.transport.receiver_rays_traced, 128)
+        self.assertEqual(result.transport.source_rays_traced, 0)
+
+    def test_bidirectional_balance_preserves_diffuse_room_energy(self):
+        room = self._room()
+        room.airt_material_preset = 'CUSTOM'
+        room.absorption_bands = (0.2,) * 7
+        room.scatter_bands = (1.0,) * 7
+        self._endpoint("Source", (-1.0, 0.0, 0.0), source=True)
+        self._endpoint("Receiver", (1.0, 0.5, 0.0))
+        scene = bpy.context.scene
+        scene.airt_num_rays = 4096
+        scene.airt_max_order = 2
+        scene.airt_early_reflections = False
+        scene.airt_bidirectional = False
+        receiver_only = self._render('DIFFUSE')
+        scene.airt_bidirectional = True
+        bidirectional = self._render('DIFFUSE')
+
+        def order_energy(result, order):
+            return sum(
+                float(np.mean(event.energy_bands))
+                for event in result.events
+                if event.kind == 'DIFFUSE' and event.order == order
+            )
+
+        for order in (1, 2):
+            self.assertAlmostEqual(
+                order_energy(bidirectional, order)
+                / order_energy(receiver_only, order),
+                1.0,
+                delta=0.1,
+            )
+        self.assertGreater(bidirectional.transport.subpath_connections, 0)
 
     def test_blocked_source_receiver_scene_renders_diffraction(self):
         bpy.ops.mesh.primitive_plane_add(
@@ -407,10 +456,42 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
 
         self.assertEqual(len(absorbing_events), 1)
         self.assertEqual(len(reflective_events), 1)
+        self.assertIsNotNone(
+            absorbing_events[0].coherent_pressure_bands
+        )
         self.assertAlmostEqual(
             float(
                 absorbing_events[0].energy_bands[0]
                 / reflective_events[0].energy_bands[0]
+            ),
+            float(
+                MaterialProperties(absorbing).specular_pressure_spectrum(
+                    1.0 / sqrt(1.25)
+                )[0] ** 2
+            ),
+            places=5,
+        )
+
+        scene.airt_coherent_reflections = False
+        legacy_absorbing = AmbisonicIREngine(
+            bpy.context
+        )._first_order_specular_events(
+            Vector((-1.0, -0.5, 1.0)),
+            Vector((-1.0, 0.5, 1.0)),
+        )
+        legacy_reflective = AmbisonicIREngine(
+            bpy.context
+        )._first_order_specular_events(
+            Vector((1.0, -0.5, 1.0)),
+            Vector((1.0, 0.5, 1.0)),
+        )
+        self.assertIsNone(
+            legacy_absorbing[0].coherent_pressure_bands
+        )
+        self.assertAlmostEqual(
+            float(
+                legacy_absorbing[0].energy_bands[0]
+                / legacy_reflective[0].energy_bands[0]
             ),
             0.2,
             places=5,
@@ -475,6 +556,9 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
             self.assertAlmostEqual(scene.airt_ir_seconds, 2.0)
             self.assertEqual(scene.airt_output_content, 'FULL')
             self.assertTrue(scene.airt_early_reflections)
+            self.assertTrue(scene.airt_coherent_reflections)
+            self.assertTrue(scene.airt_bidirectional)
+            self.assertEqual(scene.airt_bidirectional_depth, 4)
             self.assertEqual(scene.airt_early_order, 2)
             self.assertEqual(scene.airt_early_path_budget, 1_000_000)
             self.assertTrue(scene.airt_use_receiver_orientation)
@@ -563,6 +647,7 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
 
             self.assertEqual(scene.airt_num_rays, 16384)
             self.assertEqual(scene.airt_max_order, 128)
+            self.assertEqual(scene.airt_bidirectional_depth, 8)
             self.assertEqual(scene.airt_rr_start, 48)
             self.assertAlmostEqual(scene.airt_rr_p, 0.99)
             self.assertAlmostEqual(scene.airt_min_throughput, 1e-8)
@@ -729,6 +814,21 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
             self.assertEqual(
                 len(metadata["source_directivity"]["strength_bands"]), 7
             )
+            self.assertTrue(metadata["transport_strategy"]["bidirectional"])
+            self.assertEqual(
+                metadata["transport_strategy"]["combination"],
+                "orderwise_uniform_mis",
+            )
+            self.assertEqual(
+                metadata["transport_strategy"]["subpath_join_depth"], 4
+            )
+            self.assertEqual(
+                metadata["coherent_boundary_model"],
+                "locally_reacting_resistive_inferred_from_absorption",
+            )
+            self.assertEqual(metadata["listener_rays"], 128)
+            self.assertEqual(metadata["source_rays"], 128)
+            self.assertEqual(metadata["total_stochastic_paths"], 256)
             self.assertEqual(metadata["deterministic_reflection_order"], 2)
             self.assertGreater(
                 metadata["deterministic_path_stats"]["surface_sequences_tested"],
@@ -748,6 +848,18 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
             self.assertEqual(assignment["type"], "OBJECT_FALLBACK")
             self.assertEqual(assignment["name"], "Test Room")
             self.assertGreater(assignment["evaluated_face_count"], 0)
+            self.assertEqual(
+                metadata["stochastic_path_stats"]["receiver_paths"], 128
+            )
+            self.assertEqual(
+                metadata["stochastic_path_stats"]["source_paths"], 128
+            )
+            self.assertGreater(
+                metadata["stochastic_path_stats"][
+                    "joined_subpath_connections"
+                ],
+                0,
+            )
 
     def test_acoustic_snapshot_renders_safely_in_worker_thread(self):
         self._room()

@@ -15,17 +15,22 @@ software and should not be used for building or safety decisions.
 
 ## Current architecture
 
-Version 2 uses one receiver-centric acoustic energy renderer. It no longer
-crossfades unrelated forward and reverse simulations.
+Version 2.2 uses a coherent deterministic front end and one bidirectional
+acoustic-energy renderer. It does not crossfade unrelated simulations.
 
 - Direct sound is evaluated deterministically, including per-band transmission.
 - Source radiation is evaluated in the source object's local frame for every
   direct, reflected, and diffracted path, with frequency-dependent focus.
 - Planar specular reflections are found deterministically with finite image
-  sources through a selectable first, second, or third order.
-- Remaining reflected energy is sampled from the receiver with diffuse,
-  glossy, absorptive, and transmissive surface interactions. All-specular paths
-  already covered by the image-source stage are omitted from this estimator.
+  sources through a selectable first, second, or third order. Their signed
+  pressure transfer is evaluated at the real angle of incidence using a simple
+  passive wall impedance inferred from each material's absorption bands.
+- Remaining reflected energy is sampled from both source and receiver with
+  diffuse, glossy, absorptive, and transmissive surface interactions. Retained
+  subpaths are joined to reveal routes that one-ended sampling finds rarely.
+- The receiver-only, source-only, and joined estimators are combined per path
+  order with uniform multiple-importance weights. All-specular paths already
+  covered by the image-source stage are omitted from the stochastic estimator.
 - Monte Carlo energy events are converted to pressure with repeatable randomized
   phase and a complementary seven-band filter bank.
 - Every arrival is encoded directly to third-order ACN/SN3D (AmbiX) using its
@@ -33,9 +38,9 @@ crossfades unrelated forward and reverse simulations.
 - Optional bounded single-edge diffraction supplies a creative shadow-zone
   approximation.
 
-Separating acoustic energy transport from pressure synthesis avoids treating
-unrelated late paths as phase-coherent and gives direct, early, and diffuse
-components a single geometry and level convention.
+Separating coherent pressure paths from stochastic energy transport avoids
+treating unrelated late paths as phase-coherent and gives direct, early, and
+diffuse components a single geometry and level convention.
 
 ## Requirements and installation
 
@@ -83,24 +88,36 @@ The defaults are intended as a useful first listening render:
 
 | Setting | Default | Guidance |
 | --- | ---: | --- |
-| Quality | Balanced | 1,024 receiver rays and 32 bounces |
+| Quality | Balanced | 1,024 paths per side, 32 bounces, join depth 4 |
 | Sample rate | 48 kHz | Good general production rate |
 | Duration | 2.0 s | Increase for large or highly reflective spaces |
 | Content | Full IR | Change to Wet or Diffuse for send effects |
 | Source radiation | Even in Every Direction | Neutral and independent of source rotation |
 | Early reflections | On, order 2 | Resolves first- and second-order specular paths cleanly |
+| Coherent early pressure | On | Preserves angle-dependent level and polarity on distinct echoes |
+| Bidirectional path search | On | Joins source and listener routes for better indirect coverage |
 | Air absorption | On | 20 C, 50% RH, 101.325 kPa |
 | Random seed | 1 | Repeatable comparison between scene edits |
 | Edge diffraction | Off | Enable only when shadowing needs it |
 | Output | 32-bit float | Preserves the renderer's 1/r distance level |
 
 Use **Preview** while moving geometry or auditioning materials. Use **High** for
-a smoother final tail. **Ultra High** uses 16,384 listener rays, 128 bounces,
-later path roulette, and a lower energy cutoff for long or complex spaces. It
-only changes transport quality; sample rate, duration, and IR content remain
-under explicit user control. If the tail sounds grainy, raise Listener Rays
-before raising Maximum Bounces. If energy stops too soon, increase IR Duration
-and Maximum Bounces together.
+a smoother final tail. **Ultra High** uses 16,384 paths from each endpoint, 128
+bounces, join depth 8, later path roulette, and a lower energy cutoff for long
+or complex spaces. It only changes transport quality; sample rate, duration,
+and IR content remain under explicit user control. If the tail sounds grainy,
+raise Paths per Side before raising Maximum Bounces. If energy stops too soon,
+increase IR Duration and Maximum Bounces together.
+
+**Bidirectional Path Search** traces the same number of paths from the source
+and listener, then joins compatible surface points from the two searches.
+**Subpath Join Depth** limits how many early vertices are retained at each end.
+Increasing it can uncover longer routes through doorways, corridors, and
+coupled spaces, but the number of attempted joins grows approximately with the
+square of the depth. Multiple-importance weighting is applied separately at
+every total reflection order, so enabling additional strategies does not
+intentionally multiply the reverberant level. Joined routes still obey Maximum
+Bounces as a total path-order limit.
 
 **Specular Order** controls the deterministic image-source depth independently
 of stochastic render quality. Order 2 is the default balance. Order 3 improves
@@ -114,6 +131,17 @@ sidecar. Raising the budget is useful when the geometry is already acoustically
 simple and additional waiting time is acceptable. This hybrid division follows
 the perceptually motivated structure explored by [Johnson and Lee
 (2016)](https://eprints.hud.ac.uk/id/eprint/28645/).
+
+**Coherent Early Pressure** lets direct sound and deterministic specular echoes
+retain signed pressure rather than being reconstructed from energy with an
+arbitrary phase. Because the material library contains absorption rather than
+measured complex impedance, the renderer infers a passive, purely resistive
+locally reacting boundary in each band. This makes reflection strength and
+possible polarity change with incidence angle, especially near grazing. It is
+a more plausible audible boundary response, not a substitute for measured
+phase or impedance data. Turning the option off restores the simpler
+energy-magnitude treatment for deterministic reflections; direct sound remains
+coherent.
 
 **Preserve Relative Level** is the default so Full IR exports retain distance
 and material level differences. Float WAV is recommended because close sources
@@ -229,6 +257,13 @@ receiver, render settings, normalization gain, and event counts.
 - Explicit specular image sources are limited to third order. Their cost grows
   combinatorially with distinct reflector planes, so highly tessellated curved
   geometry may reach the user-configurable early-path budget.
+- Early-reflection phase is inferred from absorption with a resistive boundary
+  model; material-specific complex impedance and resonant phase are not yet
+  represented.
+- Bidirectional subpaths are randomly paired one-to-one and use uniform
+  order-wise MIS rather than a path-density balance or power heuristic. This
+  improves difficult-path coverage while keeping render time and memory
+  predictable, but it is not a general-purpose wave or spectral path tracer.
 - Diffraction is a bounded, single-edge approximation and is disabled by
   default.
 - Sources and receivers remain ideal points. Source radiation does not model
@@ -255,6 +290,7 @@ the target Blender runtime:
 ```
 
 The test suite checks ACN/SN3D encoding, air attenuation, complementary-band
-synthesis, energy sampling, multi-order finite image-source paths, direct-path
-calibration, source directivity and rotation, content separation, diffraction,
-evaluated Blender geometry, repeatability, and output levels.
+synthesis, coherent pressure transfer, reciprocal and joined path weighting,
+multi-order finite image-source paths, direct-path calibration, source
+directivity and rotation, content separation, diffraction, evaluated Blender
+geometry, repeatability, and output levels.

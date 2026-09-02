@@ -198,6 +198,7 @@ class AIRT_PT_AudioPanel(_AIRTPanel, bpy.types.Panel):
         early.prop(scene, "airt_early_reflections")
         early_settings = early.column(align=True)
         early_settings.enabled = scene.airt_early_reflections
+        early_settings.prop(scene, "airt_coherent_reflections")
         early_settings.prop(scene, "airt_early_order")
         early_settings.prop(scene, "airt_early_gain_db")
         layout.prop(scene, "airt_diffuse_gain_db")
@@ -224,6 +225,9 @@ class AIRT_PT_AdvancedPanel(_AIRTPanel, bpy.types.Panel):
 
         sampling = layout.box()
         sampling.label(text="Reverberant Texture")
+        sampling.prop(scene, "airt_bidirectional")
+        if scene.airt_bidirectional:
+            sampling.prop(scene, "airt_bidirectional_depth")
         sampling.prop(scene, "airt_num_rays")
         sampling.prop(scene, "airt_max_order")
         sampling.prop(scene, "airt_seed")

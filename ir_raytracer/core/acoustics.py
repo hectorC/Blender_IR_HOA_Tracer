@@ -495,3 +495,34 @@ class MaterialProperties:
         # Scattering fractions
         self.specular_fraction = np.clip(1.0 - self.scatter_spectrum, 0.0, 1.0)
         self.diffuse_fraction = np.clip(self.scatter_spectrum, 0.0, 1.0)
+
+    def specular_pressure_spectrum(
+        self, incidence_cosine: float
+    ) -> np.ndarray:
+        """Return a signed, angle-aware specular pressure coefficient.
+
+        The available presets describe reflected energy rather than complex
+        wall impedance.  For coherent paths we infer the simplest passive,
+        locally reacting resistive impedance whose normal-incidence pressure
+        magnitude matches that energy.  Evaluating the plane-wave reflection
+        coefficient at the actual incidence angle restores the physically
+        important rise toward grazing reflection and its pressure-polarity
+        transition.  The specular fraction remains separate so unresolved
+        roughness does not become coherent merely at grazing incidence.
+        """
+        cosine = float(np.clip(abs(incidence_cosine), 1e-5, 1.0))
+        total_pressure = np.sqrt(
+            np.clip(self.reflection_spectrum, 0.0, 1.0)
+        ).astype(np.float64)
+        normalized_impedance = (
+            (1.0 + total_pressure)
+            / np.maximum(1.0 - total_pressure, 1e-6)
+        )
+        angle_response = (
+            normalized_impedance * cosine - 1.0
+        ) / (
+            normalized_impedance * cosine + 1.0
+        )
+        return (
+            angle_response * np.sqrt(self.specular_fraction)
+        ).astype(np.float32)

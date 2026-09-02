@@ -21,6 +21,7 @@ from ir_raytracer.core.directivity import SourceDirectivity  # noqa: E402
 from ir_raytracer.core.ray_tracer import (  # noqa: E402
     AcousticRenderConfig,
     ReceiverPathTracer,
+    _PathVertex,
 )
 from ir_raytracer.utils.scene_utils import AcousticScene  # noqa: E402
 
@@ -86,7 +87,10 @@ class RayEnergyTests(unittest.TestCase):
         _direction, diffuse_sample, _transmitted = tracer._sample_surface(
             direction, normal, material, throughput
         )
-        tracer.rng = SequenceRNG((0.5, 0.25, 0.5))
+        exponent = tracer._roughness_exponent()
+        unit_weight_cosine = (exponent + 1.0) / (exponent + 2.0)
+        specular_direction_draw = unit_weight_cosine ** (exponent + 1.0)
+        tracer.rng = SequenceRNG((0.5, specular_direction_draw, 0.5))
         _direction, specular_sample, _transmitted = tracer._sample_surface(
             direction, normal, material, throughput
         )
@@ -102,6 +106,74 @@ class RayEnergyTests(unittest.TestCase):
             + material.reflection_spectrum * material.specular_fraction
         )
         np.testing.assert_allclose(estimate, expected, rtol=1e-6, atol=1e-6)
+
+    def test_reciprocal_endpoint_connections_have_matching_energy(self):
+        material = MaterialProperties(SimpleNamespace(
+            absorption_bands=(0.0,) * NUM_BANDS,
+            scatter_bands=(1.0,) * NUM_BANDS,
+            transmission=0.0,
+            transmission_bands=(0.0,) * NUM_BANDS,
+        ))
+        tracer = ReceiverPathTracer(_config(128), AcousticScene(None, []))
+        receiver_launched = tracer._source_connection(
+            hit_point=Vector((0.0, 0.0, 0.0)),
+            normal=Vector((0.0, 0.0, 1.0)),
+            reverse_direction=Vector((0.0, 0.0, -1.0)),
+            source=Vector((0.0, 0.0, 1.0)),
+            path_distance_bu=1.0,
+            throughput=np.ones(NUM_BANDS),
+            material=material,
+            first_direction=Vector((0.0, 0.0, -1.0)),
+            bounce=0,
+        )
+        source_launched = tracer._receiver_connection(
+            hit_point=Vector((0.0, 0.0, 0.0)),
+            normal=Vector((0.0, 0.0, 1.0)),
+            incoming_direction=Vector((0.0, 0.0, -1.0)),
+            receiver=Vector((0.0, 0.0, 1.0)),
+            path_distance_bu=1.0,
+            throughput=np.ones(NUM_BANDS),
+            material=material,
+            source_polarity=np.ones(NUM_BANDS, dtype=np.float32),
+            bounce=0,
+        )
+
+        self.assertIsNotNone(receiver_launched)
+        self.assertIsNotNone(source_launched)
+        np.testing.assert_allclose(
+            receiver_launched.energy_bands,
+            source_launched.energy_bands,
+            rtol=1e-6,
+        )
+        receiver_half = tracer._source_connection(
+            hit_point=Vector((0.0, 0.0, 0.0)),
+            normal=Vector((0.0, 0.0, 1.0)),
+            reverse_direction=Vector((0.0, 0.0, -1.0)),
+            source=Vector((0.0, 0.0, 1.0)),
+            path_distance_bu=1.0,
+            throughput=np.ones(NUM_BANDS),
+            material=material,
+            first_direction=Vector((0.0, 0.0, -1.0)),
+            bounce=0,
+            strategy_weight=0.5,
+        )
+        source_half = tracer._receiver_connection(
+            hit_point=Vector((0.0, 0.0, 0.0)),
+            normal=Vector((0.0, 0.0, 1.0)),
+            incoming_direction=Vector((0.0, 0.0, -1.0)),
+            receiver=Vector((0.0, 0.0, 1.0)),
+            path_distance_bu=1.0,
+            throughput=np.ones(NUM_BANDS),
+            material=material,
+            source_polarity=np.ones(NUM_BANDS, dtype=np.float32),
+            bounce=0,
+            strategy_weight=0.5,
+        )
+        np.testing.assert_allclose(
+            receiver_half.energy_bands + source_half.energy_bands,
+            receiver_launched.energy_bands,
+            rtol=1e-6,
+        )
 
     def test_source_connection_weight_scales_inverse_with_ray_count(self):
         material = MaterialProperties(SimpleNamespace(
@@ -128,6 +200,103 @@ class RayEnergyTests(unittest.TestCase):
             energies.append(float(event.energy_bands[0]))
             np.testing.assert_allclose(tuple(event.arrival_direction), (1.0, 0.0, 0.0))
         self.assertAlmostEqual(energies[0] / energies[1], 8.0, places=5)
+
+    def test_intermediate_subpath_join_has_geometry_and_mis_weight(self):
+        material = MaterialProperties(SimpleNamespace(
+            absorption_bands=(0.0,) * NUM_BANDS,
+            scatter_bands=(1.0,) * NUM_BANDS,
+            transmission=0.0,
+            transmission_bands=(0.0,) * NUM_BANDS,
+        ))
+        tracer = ReceiverPathTracer(
+            replace(_config(8), max_bounces=2), AcousticScene(None, [])
+        )
+        source_vertex = _PathVertex(
+            point=Vector((0.0, 0.0, 0.0)),
+            normal=Vector((1.0, 0.0, 0.0)),
+            incoming_direction=Vector((-1.0, 0.0, 0.0)),
+            path_distance_bu=1.0,
+            throughput=np.ones(NUM_BANDS),
+            material=material,
+            all_prior_specular=True,
+            source_polarity=np.ones(NUM_BANDS, dtype=np.float32),
+        )
+        receiver_vertex = _PathVertex(
+            point=Vector((1.0, 0.0, 0.0)),
+            normal=Vector((-1.0, 0.0, 0.0)),
+            incoming_direction=Vector((1.0, 0.0, 0.0)),
+            path_distance_bu=1.0,
+            throughput=np.ones(NUM_BANDS),
+            material=material,
+            all_prior_specular=True,
+            arrival_direction=Vector((0.0, 1.0, 0.0)),
+        )
+
+        event = tracer._connect_subpath_vertices(
+            source_vertex, receiver_vertex, 1, 1
+        )
+
+        self.assertIsNotNone(event)
+        # Two uniform-sphere densities, two Lambertian BRDFs, eight joint
+        # samples, and three order-two strategies reduce to 2/3.
+        np.testing.assert_allclose(event.energy_bands, 2.0 / 3.0, rtol=1e-6)
+        self.assertEqual(event.order, 2)
+        self.assertAlmostEqual(event.delay_seconds, 3.0 / 343.0)
+        np.testing.assert_allclose(event.arrival_direction, (0.0, 1.0, 0.0))
+        self.assertEqual(tracer.stats.subpath_connections, 1)
+        capped_tracer = ReceiverPathTracer(
+            _config(8), AcousticScene(None, [])
+        )
+        self.assertIsNone(capped_tracer._connect_subpath_vertices(
+            source_vertex, receiver_vertex, 1, 1
+        ))
+
+    def test_intermediate_join_omits_only_deterministic_specular_combination(self):
+        material = MaterialProperties(SimpleNamespace(
+            absorption_bands=(0.0,) * NUM_BANDS,
+            scatter_bands=(0.0,) * NUM_BANDS,
+            transmission=0.0,
+            transmission_bands=(0.0,) * NUM_BANDS,
+        ))
+        config = replace(
+            _config(8),
+            max_bounces=2,
+            output_content='REFLECTIONS',
+            early_reflections=True,
+        )
+        tracer = ReceiverPathTracer(config, AcousticScene(None, []))
+        tracer.deterministic_specular_order = 2
+        source_vertex = _PathVertex(
+            point=Vector((0.0, 0.0, 0.0)),
+            normal=Vector((1.0, 0.0, 0.0)),
+            incoming_direction=Vector((-1.0, 0.0, 0.0)),
+            path_distance_bu=1.0,
+            throughput=np.ones(NUM_BANDS),
+            material=material,
+            all_prior_specular=True,
+            source_polarity=np.ones(NUM_BANDS, dtype=np.float32),
+        )
+        receiver_vertex = _PathVertex(
+            point=Vector((1.0, 0.0, 0.0)),
+            normal=Vector((-1.0, 0.0, 0.0)),
+            incoming_direction=Vector((1.0, 0.0, 0.0)),
+            path_distance_bu=1.0,
+            throughput=np.ones(NUM_BANDS),
+            material=material,
+            all_prior_specular=True,
+            arrival_direction=Vector((1.0, 0.0, 0.0)),
+        )
+
+        covered = tracer._connect_subpath_vertices(
+            source_vertex, receiver_vertex, 1, 1
+        )
+        source_vertex.all_prior_specular = False
+        mixed = tracer._connect_subpath_vertices(
+            source_vertex, receiver_vertex, 1, 1
+        )
+
+        self.assertIsNone(covered)
+        self.assertIsNotNone(mixed)
 
     def test_source_connection_uses_its_emission_direction(self):
         material = MaterialProperties(SimpleNamespace(
