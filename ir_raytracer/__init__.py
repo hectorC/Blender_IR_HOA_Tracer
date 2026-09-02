@@ -20,7 +20,7 @@ bl_info = {
     "category": "Object",
     "author": "ChatGPT + Hector Centeno",
     "description": "Create artistic 3rd-order ambisonic IRs from Blender geometry and acoustic materials",
-    "version": (2, 2, 1),
+    "version": (2, 3, 0),
     "location": "3D Viewport > Sidebar > IR Tracer",
     "doc_url": "",
     "tracker_url": "",

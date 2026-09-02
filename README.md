@@ -57,7 +57,7 @@ Diagnostics panel can confirm that `soundfile` is available.
 1. Model a closed or partly open space at a meaningful Blender unit scale.
 2. Select an object at the emitter position and choose **Use Active as Source**.
 3. In **Source Radiation**, keep the neutral even pattern or choose and aim a
-   directional shape. Source-local `-Y` is forward.
+   directional shape. Source-local `+Y` is forward.
 4. Select an object at the listening position and choose **Use Active as
    Receiver**. Empty objects work well for both endpoints.
 5. Select each acoustic mesh and choose an Acoustic Material preset. Expand
@@ -220,7 +220,7 @@ reflections, and diffraction from the direction in which the sound first
 leaves the source. This lets turning a source change both the early geometry
 and the reverberant field instead of acting as a direct-sound-only effect.
 
-Source-local `-Y` is the forward axis, `+X` is left, and `+Z` is up. The
+Source-local `+Y` is the forward axis, `-X` is left, and `+Z` is up. The
 evaluated world rotation is used, including parent rotation. Scale does not
 alter the pattern. **Tone by Frequency** blends each band between an even spread
 at 0 and the selected shape at 1. The Loudspeaker-like starting curve therefore
@@ -241,8 +241,8 @@ normalization (AmbiX): `W, Y, Z, X, V, T, R, S, U, Q, O, M, K, L, N, P`.
 
 **Use Receiver Orientation** is enabled by default. Every arrival is transformed
 into the receiver object's evaluated local rotation, including parent rotation,
-before ambisonic encoding. Receiver-local Front (`-Y`) maps to AmbiX front
-(`+X`), local `+X` maps to AmbiX left (`+Y`), and local `+Z` maps to up. Scale
+before ambisonic encoding. Receiver-local Front (`+Y`) maps to AmbiX front
+(`+X`), local `-X` maps to AmbiX left (`+Y`), and local `+Z` maps to up. Scale
 and translation do not affect this orientation.
 
 Disable the option to retain a Blender-world-aligned sound field using those

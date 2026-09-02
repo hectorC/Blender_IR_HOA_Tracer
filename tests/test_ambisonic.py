@@ -161,8 +161,8 @@ class OrientationTransformTests(unittest.TestCase):
 
     def test_blender_reference_axes_map_to_ambix_axes(self):
         cases = (
-            (Vector((0.0, -1.0, 0.0)), (1.0, 0.0, 0.0)),  # front
-            (Vector((1.0, 0.0, 0.0)), (0.0, 1.0, 0.0)),   # left
+            (Vector((0.0, 1.0, 0.0)), (1.0, 0.0, 0.0)),   # front
+            (Vector((-1.0, 0.0, 0.0)), (0.0, 1.0, 0.0)),  # left
             (Vector((0.0, 0.0, 1.0)), (0.0, 0.0, 1.0)),   # up
         )
         for direction, expected in cases:
@@ -170,7 +170,7 @@ class OrientationTransformTests(unittest.TestCase):
                 self.assert_vector_close(apply_orientation_transform(direction), expected)
 
     def test_yaw_and_z_flip_are_applied_in_ambix_space(self):
-        front = Vector((0.0, -1.0, 0.0))
+        front = Vector((0.0, 1.0, 0.0))
         self.assert_vector_close(
             apply_orientation_transform(front, yaw_offset_deg=90.0),
             (0.0, 1.0, 0.0),
@@ -181,7 +181,7 @@ class OrientationTransformTests(unittest.TestCase):
         )
 
     def test_encoder_composes_orientation_and_spherical_harmonics(self):
-        encoded = AmbisonicEncoder().encode(Vector((0.0, -1.0, 0.0)))
+        encoded = AmbisonicEncoder().encode(Vector((0.0, 1.0, 0.0)))
         self.assertAlmostEqual(float(encoded[3]), 1.0, places=6)
         self.assertAlmostEqual(float(encoded[1]), 0.0, places=6)
         self.assertAlmostEqual(float(encoded[2]), 0.0, places=6)
@@ -190,8 +190,8 @@ class OrientationTransformTests(unittest.TestCase):
         rotation = Euler((0.37, -0.52, 1.11), 'XYZ').to_quaternion()
         encoder = AmbisonicEncoder(receiver_rotation=rotation)
         cases = (
-            (Vector((0.0, -1.0, 0.0)), (0.0, 0.0, 1.0)),  # local front
-            (Vector((1.0, 0.0, 0.0)), (1.0, 0.0, 0.0)),   # local left
+            (Vector((0.0, 1.0, 0.0)), (0.0, 0.0, 1.0)),   # local front
+            (Vector((-1.0, 0.0, 0.0)), (1.0, 0.0, 0.0)),  # local left
             (Vector((0.0, 0.0, 1.0)), (0.0, 1.0, 0.0)),   # local up
         )
         for local_direction, expected_first_order in cases:
@@ -202,7 +202,7 @@ class OrientationTransformTests(unittest.TestCase):
 
     def test_artistic_yaw_is_applied_after_receiver_rotation(self):
         rotation = Euler((0.0, 0.0, math.pi / 2.0), 'XYZ').to_quaternion()
-        world_front = rotation @ Vector((0.0, -1.0, 0.0))
+        world_front = rotation @ Vector((0.0, 1.0, 0.0))
         encoded = AmbisonicEncoder(
             yaw_offset_deg=90.0,
             receiver_rotation=rotation,

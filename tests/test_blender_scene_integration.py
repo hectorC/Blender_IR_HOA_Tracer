@@ -226,7 +226,7 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
         self.assertGreater(float(np.max(np.abs(result.ir))), 0.0)
 
         source_object.airt_source_directivity = 'FORWARD_CONE'
-        source_object.rotation_euler.z = -pi / 2.0
+        source_object.rotation_euler.z = pi / 2.0
         bpy.context.view_layer.update()
         engine = AmbisonicIREngine(bpy.context)
         shadowed = engine._direct_or_diffraction_events(
@@ -257,15 +257,15 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
         parent.rotation_euler = (0.0, 0.0, pi / 2.0)
         parent.scale = (2.0, 3.0, 4.0)
         bpy.context.scene.collection.objects.link(parent)
-        self._endpoint("Source", (1.0, 0.0, 0.0), source=True)
+        self._endpoint("Source", (-1.0, 0.0, 0.0), source=True)
         receiver = self._endpoint("Receiver", (0.0, 0.0, 0.0))
         receiver.parent = parent
         bpy.context.view_layer.update()
 
         rotation = object_world_rotation(bpy.context, receiver)
         np.testing.assert_allclose(
-            rotation @ Vector((0.0, -1.0, 0.0)),
-            Vector((1.0, 0.0, 0.0)),
+            rotation @ Vector((0.0, 1.0, 0.0)),
+            Vector((-1.0, 0.0, 0.0)),
             atol=1e-6,
         )
 
@@ -276,15 +276,15 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
         scene.airt_use_receiver_orientation = False
         world_aligned = self._render('FULL')
 
-        # World +X is receiver-local front after the parent's +90 degree yaw.
+        # World -X is receiver-local front after the parent's +90 degree yaw.
         self.assertAlmostEqual(float(np.sum(receiver_aligned.ir[3])), 1.0, places=5)
         self.assertAlmostEqual(float(np.sum(receiver_aligned.ir[1])), 0.0, places=5)
-        # With the option disabled, Blender world +X remains AmbiX left.
+        # With the option disabled, Blender world -X remains AmbiX left.
         self.assertAlmostEqual(float(np.sum(world_aligned.ir[1])), 1.0, places=5)
         self.assertAlmostEqual(float(np.sum(world_aligned.ir[3])), 0.0, places=5)
 
     def test_source_rotation_aims_radiation_without_rotating_sound_field(self):
-        source = self._endpoint("Source", (0.0, 1.0, 0.0), source=True)
+        source = self._endpoint("Source", (0.0, -1.0, 0.0), source=True)
         self._endpoint("Receiver", (0.0, 0.0, 0.0))
         source.airt_source_directivity = 'CARDIOID'
         front = self._render('FULL')
@@ -749,7 +749,7 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
         self._specular_wall("Wall A", 0.0)
         self._specular_wall("Wall B", 10.0)
         source.airt_source_directivity = 'FORWARD_CONE'
-        source.rotation_euler.z = pi / 2.0
+        source.rotation_euler.z = -pi / 2.0
         bpy.context.view_layer.update()
 
         engine = AmbisonicIREngine(bpy.context)
@@ -809,8 +809,17 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
                 metadata["source_directivity"]["pattern"], "LOUDSPEAKER"
             )
             self.assertEqual(
-                metadata["source_directivity"]["forward_axis"], "-Y"
+                metadata["source_directivity"]["forward_axis"], "+Y"
             )
+            self.assertEqual(
+                metadata["source_directivity"]["left_axis"], "-X"
+            )
+            self.assertEqual(
+                metadata["source_directivity"]["up_axis"], "+Z"
+            )
+            self.assertEqual(metadata["orientation"]["forward_axis"], "+Y")
+            self.assertEqual(metadata["orientation"]["left_axis"], "-X")
+            self.assertEqual(metadata["orientation"]["up_axis"], "+Z")
             self.assertEqual(
                 len(metadata["source_directivity"]["strength_bands"]), 7
             )

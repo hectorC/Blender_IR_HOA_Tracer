@@ -98,7 +98,7 @@ class AIRT_PT_SourcePanel(_AIRTPanel, bpy.types.Panel):
             return
 
         layout.label(
-            text="Source local -Y points forward; rotate the object to aim",
+            text="Source local +Y points forward; rotate the object to aim",
             icon='ORIENTATION_LOCAL',
         )
         if source.airt_source_directivity == 'FORWARD_CONE':
@@ -265,6 +265,14 @@ class AIRT_PT_AdvancedPanel(_AIRTPanel, bpy.types.Panel):
         orientation = layout.box()
         orientation.label(text="Ambisonic Orientation")
         orientation.prop(scene, "airt_use_receiver_orientation")
+        orientation.label(
+            text=(
+                "Receiver local +Y is front; -X is left"
+                if scene.airt_use_receiver_orientation
+                else "Blender world +Y is front; -X is left"
+            ),
+            icon='ORIENTATION_LOCAL',
+        )
         orientation.prop(scene, "airt_yaw_offset_deg")
         orientation.prop(scene, "airt_invert_z")
 

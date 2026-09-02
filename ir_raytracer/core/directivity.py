@@ -39,7 +39,7 @@ DEFAULT_CUSTOM_SH = (
     0.5,  # W
     0.0,  # Y
     0.0,  # Z
-    0.5,  # X: source-local -Y/front after Blender-to-AmbiX mapping
+    0.5,  # X: source-local +Y/front after Blender-to-AmbiX mapping
     0.0, 0.0, 0.0, 0.0, 0.0,
     0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
 )
@@ -125,7 +125,7 @@ class SourceDirectivity:
 
     def _pattern_pressure(self, local_direction: mathutils.Vector) -> float:
         """Return peak-normalized signed pressure for a local direction."""
-        forward_cosine = float(np.clip(-local_direction.y, -1.0, 1.0))
+        forward_cosine = float(np.clip(local_direction.y, -1.0, 1.0))
         if self.pattern == 'OMNI':
             return 1.0
         if self.pattern == 'CARDIOID':
@@ -179,7 +179,9 @@ class SourceDirectivity:
         result = {
             "pattern": self.pattern,
             "reference": "source_local",
-            "forward_axis": "-Y",
+            "forward_axis": "+Y",
+            "left_axis": "-X",
+            "up_axis": "+Z",
             "normalization": "unity_peak_pressure",
             "strength_bands": [
                 float(value) for value in self.strength_bands

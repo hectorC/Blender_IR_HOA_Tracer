@@ -23,8 +23,8 @@ from ir_raytracer.core.directivity import (  # noqa: E402
 
 
 class SourceDirectivityTests(unittest.TestCase):
-    front = Vector((0.0, -1.0, 0.0))
-    rear = Vector((0.0, 1.0, 0.0))
+    front = Vector((0.0, 1.0, 0.0))
+    rear = Vector((0.0, -1.0, 0.0))
     side = Vector((1.0, 0.0, 0.0))
 
     def test_omnidirectional_default_is_unity_everywhere(self):
@@ -50,15 +50,15 @@ class SourceDirectivityTests(unittest.TestCase):
         np.testing.assert_allclose(energy, 1.0)
         np.testing.assert_allclose(polarity, -1.0)
 
-    def test_evaluated_source_rotation_aims_local_minus_y(self):
+    def test_evaluated_source_rotation_aims_local_plus_y(self):
         rotation = Quaternion(Vector((0.0, 0.0, 1.0)), pi / 2.0)
         directivity = SourceDirectivity('CARDIOID', source_rotation=rotation)
         np.testing.assert_allclose(
-            directivity.pressure_gain(Vector((1.0, 0.0, 0.0))), 1.0,
+            directivity.pressure_gain(Vector((-1.0, 0.0, 0.0))), 1.0,
             atol=1e-6,
         )
         np.testing.assert_allclose(
-            directivity.pressure_gain(Vector((-1.0, 0.0, 0.0))), 0.0,
+            directivity.pressure_gain(Vector((1.0, 0.0, 0.0))), 0.0,
             atol=1e-6,
         )
 
@@ -76,7 +76,7 @@ class SourceDirectivityTests(unittest.TestCase):
     def test_cone_width_is_six_db_pressure_width(self):
         directivity = SourceDirectivity('FORWARD_CONE', cone_width_deg=90.0)
         half_angle = pi / 4.0
-        edge = Vector((sin(half_angle), -cos(half_angle), 0.0))
+        edge = Vector((sin(half_angle), cos(half_angle), 0.0))
         np.testing.assert_allclose(
             directivity.pressure_gain(edge), 0.5, atol=1e-6
         )
@@ -105,7 +105,9 @@ class SourceDirectivityTests(unittest.TestCase):
             directivity.pressure_gain(self.rear), 0.0, atol=1e-6
         )
         metadata = directivity.metadata()
-        self.assertEqual(metadata['forward_axis'], '-Y')
+        self.assertEqual(metadata['forward_axis'], '+Y')
+        self.assertEqual(metadata['left_axis'], '-X')
+        self.assertEqual(metadata['up_axis'], '+Z')
         self.assertEqual(metadata['normalization'], 'unity_peak_pressure')
         self.assertEqual(
             len(metadata['custom_acn_sn3d_pressure_coefficients']), 16

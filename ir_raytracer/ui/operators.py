@@ -239,6 +239,9 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
                     if config.encoder.use_receiver_orientation
                     else "blender_world"
                 ),
+                "forward_axis": "+Y",
+                "left_axis": "-X",
+                "up_axis": "+Z",
                 "use_receiver_orientation": (
                     config.encoder.use_receiver_orientation
                 ),

@@ -11,11 +11,10 @@ def apply_orientation_transform(direction: mathutils.Vector, yaw_offset_deg: flo
                                invert_z: bool = False) -> mathutils.Vector:
     """Apply orientation transforms to map Blender coordinates to AmbiX.
     
-    Blender has no universal world-space "forward" direction, so the add-on uses
-    the same reference frame as Blender's Front view: -Y is acoustic front, +X
-    is acoustic left, and +Z is up. These axes map directly to AmbiX +X, +Y,
-    and +Z respectively. A yaw rotation and optional Z flip are applied after
-    that basis conversion.
+    The add-on uses Blender local/world +Y as acoustic front, -X as acoustic
+    left, and +Z as up. These axes map directly to AmbiX +X, +Y, and +Z
+    respectively. A yaw rotation and optional Z flip are applied after that
+    basis conversion.
     
     Args:
         direction: Direction vector in Blender coordinates
@@ -25,10 +24,10 @@ def apply_orientation_transform(direction: mathutils.Vector, yaw_offset_deg: flo
     Returns:
         Transformed direction vector
     """
-    # Blender -> AmbiX basis mapping: X_a = -Y_b, Y_a = +X_b, Z_a = +Z_b
+    # Blender -> AmbiX basis mapping: X_a = +Y_b, Y_a = -X_b, Z_a = +Z_b
     xb, yb, zb = float(direction.x), float(direction.y), float(direction.z)
-    xa = -yb
-    ya = xb
+    xa = yb
+    ya = -xb
     za = zb
     
     # Yaw around +Z (AmbiX frame)

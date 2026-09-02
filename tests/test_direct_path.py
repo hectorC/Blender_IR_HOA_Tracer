@@ -55,7 +55,7 @@ def _config(content: str) -> AcousticRenderConfig:
 
 
 class DirectPathTests(unittest.TestCase):
-    source = Vector((0.0, -1.0, 0.0))
+    source = Vector((0.0, 1.0, 0.0))
     receiver = Vector((0.0, 0.0, 0.0))
 
     def _render(self, content):
@@ -84,9 +84,9 @@ class DirectPathTests(unittest.TestCase):
 
     def test_direct_pressure_obeys_inverse_distance(self):
         engine = AmbisonicIREngine(None, _config('FULL'), AcousticScene(None, []))
-        one_metre = engine.render(Vector((0.0, -1.0, 0.0)), self.receiver).ir
+        one_metre = engine.render(Vector((0.0, 1.0, 0.0)), self.receiver).ir
         engine = AmbisonicIREngine(None, _config('FULL'), AcousticScene(None, []))
-        two_metres = engine.render(Vector((0.0, -2.0, 0.0)), self.receiver).ir
+        two_metres = engine.render(Vector((0.0, 2.0, 0.0)), self.receiver).ir
         self.assertAlmostEqual(
             float(np.sum(two_metres[0]))
             / float(np.sum(one_metre[0])),
