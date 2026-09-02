@@ -19,19 +19,19 @@ def _draw_acoustic_coefficients(layout, owner):
     column.prop(owner, "scatter")
     column.prop(owner, "transmission")
     layout.label(
-        text="Scattering represents detail absent from the mesh",
+        text="Scattering softens echoes using detail outside the mesh",
         icon='INFO',
     )
     layout.prop(owner, "show_frequency_details", toggle=True)
     if owner.show_frequency_details:
         box = layout.box()
-        box.label(text="Manual bands: A / S / T")
+        box.label(text="Tone by frequency: Dampen / Spread / Leak")
         for index, label in enumerate(BAND_LABELS):
             row = box.row(align=True)
             row.label(text=label)
-            row.prop(owner, "absorption_bands", index=index, text="A")
+            row.prop(owner, "absorption_bands", index=index, text="D")
             row.prop(owner, "scatter_bands", index=index, text="S")
-            row.prop(owner, "transmission_bands", index=index, text="T")
+            row.prop(owner, "transmission_bands", index=index, text="L")
 
 
 class AIRT_PT_Panel(_AIRTPanel, bpy.types.Panel):
@@ -130,7 +130,7 @@ class AIRT_PT_AudioPanel(_AIRTPanel, bpy.types.Panel):
         output.prop(scene, "airt_normalization")
         if scene.airt_normalization == 'PEAK':
             output.prop(scene, "airt_peak_db")
-            output.label(text="Removes absolute distance level", icon='ERROR')
+            output.label(text="Source distance will no longer set loudness", icon='ERROR')
         output.label(text="16 channels — ACN/SN3D (AmbiX)", icon='INFO')
 
 
@@ -145,7 +145,7 @@ class AIRT_PT_AdvancedPanel(_AIRTPanel, bpy.types.Panel):
         scene = context.scene
 
         sampling = layout.box()
-        sampling.label(text="Receiver-Centric Sampling")
+        sampling.label(text="Reverberant Texture")
         sampling.prop(scene, "airt_num_rays")
         sampling.prop(scene, "airt_max_order")
         sampling.prop(scene, "airt_seed")
@@ -159,10 +159,10 @@ class AIRT_PT_AdvancedPanel(_AIRTPanel, bpy.types.Panel):
 
         if scene.airt_early_reflections:
             deterministic = layout.box()
-            deterministic.label(text="Deterministic Specular Paths")
+            deterministic.label(text="Distinct Planar Echo Search")
             deterministic.prop(scene, "airt_early_path_budget")
             deterministic.label(
-                text="Higher orders grow rapidly with reflector count",
+                text="Complex geometry can make higher echo orders expensive",
                 icon='INFO',
             )
 
@@ -178,7 +178,7 @@ class AIRT_PT_AdvancedPanel(_AIRTPanel, bpy.types.Panel):
         if scene.airt_enable_diffraction:
             diffraction.prop(scene, "airt_diffraction_samples")
             diffraction.prop(scene, "airt_diffraction_max_deg")
-            diffraction.label(text="Single-edge artistic approximation", icon='INFO')
+            diffraction.label(text="Softens acoustic shadows behind one edge", icon='INFO')
 
         orientation = layout.box()
         orientation.label(text="Ambisonic Orientation")

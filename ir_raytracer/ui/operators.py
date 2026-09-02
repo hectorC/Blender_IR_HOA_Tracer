@@ -122,7 +122,10 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
 
     bl_idname = "airt.render_ir"
     bl_label = "Render Ambisonic IR"
-    bl_description = "Render direct, early, and diffuse acoustic energy into a 16-channel HOA WAV"
+    bl_description = (
+        "Capture how the virtual space sounds around the receiver as a "
+        "16-channel third-order AmbiX impulse response"
+    )
     bl_options = {'REGISTER'}
 
     _is_running = False
@@ -417,7 +420,10 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
 class AIRT_OT_AssignSource(bpy.types.Operator):
     bl_idname = "airt.assign_source"
     bl_label = "Use Active as Source"
-    bl_description = "Use the active object's evaluated world position as the source"
+    bl_description = (
+        "Use the active object to mark where the imagined sound begins; its "
+        "evaluated position is used"
+    )
 
     def execute(self, context):
         active = context.active_object
@@ -438,7 +444,10 @@ class AIRT_OT_AssignSource(bpy.types.Operator):
 class AIRT_OT_AssignReceiver(bpy.types.Operator):
     bl_idname = "airt.assign_receiver"
     bl_label = "Use Active as Receiver"
-    bl_description = "Use the active object's evaluated world position as the HOA receiver"
+    bl_description = (
+        "Use the active object as the virtual listening point and optional "
+        "facing direction for the ambisonic field"
+    )
 
     def execute(self, context):
         active = context.active_object
@@ -459,7 +468,10 @@ class AIRT_OT_AssignReceiver(bpy.types.Operator):
 class AIRT_OT_ValidateScene(bpy.types.Operator):
     bl_idname = "airt.validate_scene"
     bl_label = "Validate Acoustic Scene"
-    bl_description = "Check the selected endpoints, geometry, scale, and output settings"
+    bl_description = (
+        "Check that the source, listener, visible acoustic geometry, scene "
+        "scale, and output destination are ready to render"
+    )
 
     def execute(self, context):
         issues = []
@@ -496,6 +508,10 @@ class AIRT_OT_ValidateScene(bpy.types.Operator):
 class AIRT_OT_ResetMaterial(bpy.types.Operator):
     bl_idname = "airt.reset_material"
     bl_label = "Reset Acoustic Material"
+    bl_description = (
+        "Return the active acoustic assignment to a neutral custom surface "
+        "with gentle damping and scattering"
+    )
 
     def execute(self, context):
         obj = context.active_object
@@ -520,7 +536,10 @@ class AIRT_OT_ResetMaterial(bpy.types.Operator):
 class AIRT_OT_CopyMaterial(bpy.types.Operator):
     bl_idname = "airt.copy_material"
     bl_label = "Copy Acoustic Material to Selected"
-    bl_description = "Copy active acoustic coefficients to matching selected assignments"
+    bl_description = (
+        "Give the selected objects or materials the same acoustic character "
+        "as the active assignment"
+    )
 
     def execute(self, context):
         source_object = context.active_object
@@ -572,6 +591,9 @@ class AIRT_OT_CopyMaterial(bpy.types.Operator):
 class AIRT_OT_CheckDependencies(bpy.types.Operator):
     bl_idname = "airt.check_dependencies"
     bl_label = "Check Audio Dependency"
+    bl_description = (
+        "Check whether Blender can save the rendered multichannel WAV file"
+    )
 
     def execute(self, _context):
         available, module_or_error = check_soundfile_availability()

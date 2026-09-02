@@ -454,6 +454,53 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
         finally:
             bpy.data.scenes.remove(scene)
 
+    def test_every_artist_facing_control_has_tooltip_text(self):
+        owner_properties = {
+            'absorption',
+            'absorption_bands',
+            'scatter',
+            'scatter_bands',
+            'transmission',
+            'transmission_bands',
+            'show_frequency_details',
+            'is_acoustic_source',
+            'is_acoustic_receiver',
+        }
+        discovered = []
+        for owner_type in (
+            bpy.types.Object,
+            bpy.types.Material,
+            bpy.types.Scene,
+        ):
+            for prop in owner_type.bl_rna.properties:
+                if (
+                    prop.identifier.startswith('airt_')
+                    or prop.identifier in owner_properties
+                ):
+                    discovered.append(
+                        (owner_type.__name__, prop.identifier)
+                    )
+                    self.assertTrue(
+                        prop.description.strip(),
+                        f"{owner_type.__name__}.{prop.identifier} has no tooltip",
+                    )
+                    if prop.type == 'ENUM':
+                        for item in prop.enum_items:
+                            self.assertTrue(
+                                item.description.strip(),
+                                f"{owner_type.__name__}.{prop.identifier} "
+                                f"item {item.identifier} has no tooltip",
+                            )
+        self.assertTrue(discovered)
+
+        for operator_type in ir_raytracer.classes:
+            if not issubclass(operator_type, bpy.types.Operator):
+                continue
+            self.assertTrue(
+                operator_type.bl_description.strip(),
+                f"{operator_type.__name__} has no tooltip",
+            )
+
     def test_ultra_high_profile_increases_transport_quality_only(self):
         scene = bpy.data.scenes.new("Ultra High Test")
         try:
