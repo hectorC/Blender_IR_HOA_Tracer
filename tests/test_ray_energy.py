@@ -17,6 +17,7 @@ if PROJECT_ROOT not in sys.path:
 
 from ir_raytracer.core.acoustics import MaterialProperties, NUM_BANDS  # noqa: E402
 from ir_raytracer.core.ambisonic import AmbisonicEncoder  # noqa: E402
+from ir_raytracer.core.directivity import SourceDirectivity  # noqa: E402
 from ir_raytracer.core.ray_tracer import (  # noqa: E402
     AcousticRenderConfig,
     ReceiverPathTracer,
@@ -127,6 +128,44 @@ class RayEnergyTests(unittest.TestCase):
             energies.append(float(event.energy_bands[0]))
             np.testing.assert_allclose(tuple(event.arrival_direction), (1.0, 0.0, 0.0))
         self.assertAlmostEqual(energies[0] / energies[1], 8.0, places=5)
+
+    def test_source_connection_uses_its_emission_direction(self):
+        material = MaterialProperties(SimpleNamespace(
+            absorption_bands=(0.0,) * NUM_BANDS,
+            scatter_bands=(1.0,) * NUM_BANDS,
+            transmission=0.0,
+            transmission_bands=(0.0,) * NUM_BANDS,
+        ))
+        arguments = dict(
+            hit_point=Vector((0.0, 0.0, 0.0)),
+            normal=Vector((0.0, 0.0, 1.0)),
+            reverse_direction=Vector((0.0, 0.0, -1.0)),
+            source=Vector((0.0, 0.0, 1.0)),
+            path_distance_bu=1.0,
+            throughput=np.ones(NUM_BANDS),
+            material=material,
+            first_direction=Vector((1.0, 0.0, 0.0)),
+            bounce=0,
+        )
+        omni_tracer = ReceiverPathTracer(_config(128), AcousticScene(None, []))
+        cardioid_tracer = ReceiverPathTracer(
+            replace(
+                _config(128),
+                source_directivity=SourceDirectivity('CARDIOID'),
+            ),
+            AcousticScene(None, []),
+        )
+        omni = omni_tracer._source_connection(**arguments)
+        cardioid = cardioid_tracer._source_connection(**arguments)
+
+        self.assertIsNotNone(omni)
+        self.assertIsNotNone(cardioid)
+        # Emission toward the hit is source-local -Z, the cardioid side plane.
+        np.testing.assert_allclose(
+            cardioid.energy_bands,
+            omni.energy_bands * 0.25,
+            rtol=1e-6,
+        )
 
     def test_material_supports_frequency_dependent_transmission(self):
         transmission = tuple(np.linspace(0.05, 0.65, NUM_BANDS))

@@ -11,6 +11,10 @@ from ..core.acoustics import (
     MATERIAL_PRESETS,
     NUM_BANDS,
 )
+from ..core.directivity import (
+    DEFAULT_CUSTOM_SH,
+    DIRECTIVITY_STRENGTH_PRESETS,
+)
 
 
 _MATERIAL_GUARD = set()
@@ -308,6 +312,14 @@ def _mark_quality_custom(self, _context):
         self.airt_quality_preset = 'CUSTOM'
 
 
+def _update_source_directivity(self, _context):
+    """Give each radiation shape a useful tonal starting curve."""
+    pattern = getattr(self, 'airt_source_directivity', 'OMNI')
+    strengths = DIRECTIVITY_STRENGTH_PRESETS.get(pattern)
+    if strengths is not None:
+        self.airt_source_directivity_bands = strengths
+
+
 def register_acoustic_props():
     obj = bpy.types.Object
     material = bpy.types.Material
@@ -336,6 +348,82 @@ def register_acoustic_props():
         description=(
             "Place the virtual listener here; its rotation can also define "
             "the front, sides, and height of the ambisonic sound field"
+        ),
+        default=False,
+    )
+    obj.airt_source_directivity = bpy.props.EnumProperty(
+        name="Radiation Shape",
+        description=(
+            "Choose how the source projects sound around itself; rotate the "
+            "source object to aim any directional shape"
+        ),
+        items=[
+            (
+                'OMNI', 'Even in Every Direction',
+                'Radiate equally around the source, ideal for a neutral starting point or an uncharacterized sound',
+            ),
+            (
+                'CARDIOID', 'Forward Focus',
+                'Keep the front strong while gently quieting the sides and rejecting the rear, like many microphones and small radiators',
+            ),
+            (
+                'DIPOLE', 'Front and Back',
+                'Project equally forward and backward with quiet sides; the rear has opposite polarity',
+            ),
+            (
+                'FORWARD_CONE', 'Focused Beam',
+                'Aim sound into an adjustable forward beam for horns, megaphones, or strongly projected artistic sources',
+            ),
+            (
+                'LOUDSPEAKER', 'Loudspeaker-like',
+                'Let bass spread broadly while mids and highs become progressively more forward-facing',
+            ),
+            (
+                'CUSTOM_SH', 'Custom 3D Pattern',
+                'Build an advanced third-order 3D radiation shape from signed AmbiX coefficients',
+            ),
+        ],
+        default='OMNI',
+        update=_update_source_directivity,
+    )
+    obj.airt_source_directivity_bands = bpy.props.FloatVectorProperty(
+        name="Directional Focus by Frequency",
+        description=(
+            "Blend each tonal region between an even spread at 0 and the "
+            "chosen radiation shape at 1, from bass through treble"
+        ),
+        size=NUM_BANDS,
+        min=0.0,
+        max=1.0,
+        default=DIRECTIVITY_STRENGTH_PRESETS['OMNI'],
+    )
+    obj.airt_source_cone_width_deg = bpy.props.FloatProperty(
+        name="Beam Width",
+        description=(
+            "Width in degrees of the focused beam at the point where it has "
+            "fallen by 6 dB; smaller values create a tighter projection"
+        ),
+        default=90.0,
+        min=10.0,
+        max=170.0,
+    )
+    obj.airt_source_directivity_sh = bpy.props.FloatVectorProperty(
+        name="Custom Pattern Coefficients",
+        description=(
+            "Signed third-order ACN/SN3D AmbiX weights used to sculpt the "
+            "custom 3D source pattern; the strongest direction is kept at "
+            "the same peak level"
+        ),
+        size=16,
+        min=-4.0,
+        max=4.0,
+        default=DEFAULT_CUSTOM_SH,
+    )
+    obj.show_source_directivity_details = bpy.props.BoolProperty(
+        name="Tone by Frequency",
+        description=(
+            "Open seven controls for making the source more or less "
+            "directional in its bass, midrange, and treble"
         ),
         default=False,
     )
@@ -749,6 +837,9 @@ def unregister_acoustic_props():
     )
     object_names = acoustic_owner_names + (
         'is_acoustic_source', 'is_acoustic_receiver',
+        'airt_source_directivity', 'airt_source_directivity_bands',
+        'airt_source_cone_width_deg', 'airt_source_directivity_sh',
+        'show_source_directivity_details',
     )
     material_names = acoustic_owner_names + ('airt_acoustic_enabled',)
     scene_names = (

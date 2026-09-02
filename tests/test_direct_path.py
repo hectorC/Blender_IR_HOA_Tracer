@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from dataclasses import replace
 
 import numpy as np
 from mathutils import Vector
@@ -14,6 +15,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from ir_raytracer.core.ambisonic import AmbisonicEncoder  # noqa: E402
+from ir_raytracer.core.directivity import SourceDirectivity  # noqa: E402
 from ir_raytracer.core.ray_tracer import (  # noqa: E402
     AcousticRenderConfig,
     AmbisonicIREngine,
@@ -91,6 +93,37 @@ class DirectPathTests(unittest.TestCase):
             0.5,
             places=5,
         )
+
+    def test_direct_sound_obeys_source_pattern_and_polarity(self):
+        omni_engine = AmbisonicIREngine(
+            None, _config('FULL'), AcousticScene(None, [])
+        )
+        omni = omni_engine.render(self.source, self.receiver)
+
+        cardioid_engine = AmbisonicIREngine(
+            None,
+            replace(
+                _config('FULL'),
+                source_directivity=SourceDirectivity('CARDIOID'),
+            ),
+            AcousticScene(None, []),
+        )
+        cardioid = cardioid_engine.render(self.source, self.receiver)
+        self.assertEqual(cardioid.transport.direct_events, 0)
+        np.testing.assert_array_equal(
+            cardioid.ir, np.zeros_like(cardioid.ir)
+        )
+
+        dipole_engine = AmbisonicIREngine(
+            None,
+            replace(
+                _config('FULL'),
+                source_directivity=SourceDirectivity('DIPOLE'),
+            ),
+            AcousticScene(None, []),
+        )
+        dipole = dipole_engine.render(self.source, self.receiver)
+        np.testing.assert_allclose(dipole.ir, -omni.ir, atol=1e-7)
 
 
 if __name__ == "__main__":

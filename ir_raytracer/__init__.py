@@ -7,6 +7,7 @@ from scene geometry using receiver-centric acoustic energy transport.
 
 Features:
 - Third-order ambisonic encoding with configurable orientation offsets
+- Frequency-dependent source radiation using evaluated object orientation
 - Deterministic direct/early paths and stochastic diffuse transport
 - Per-material acoustic assignments with frequency-dependent object fallbacks
 - Russian roulette termination and frequency-dependent air absorption
@@ -19,7 +20,7 @@ bl_info = {
     "category": "Object",
     "author": "ChatGPT + Hector Centeno",
     "description": "Create artistic 3rd-order ambisonic IRs from Blender geometry and acoustic materials",
-    "version": (2, 0, 0),
+    "version": (2, 1, 0),
     "location": "3D Viewport > Sidebar > IR Tracer",
     "doc_url": "",
     "tracker_url": "",
@@ -32,7 +33,8 @@ from typing import List
 # Import UI components
 from .ui.properties import register_acoustic_props, unregister_acoustic_props
 from .ui.panels import (
-    AIRT_PT_Panel, 
+    AIRT_PT_Panel,
+    AIRT_PT_SourcePanel,
     AIRT_PT_MaterialPanel, 
     AIRT_PT_AudioPanel,
     AIRT_PT_AdvancedPanel,
@@ -53,6 +55,7 @@ from .ui.operators import (
 classes = [
     # Panels
     AIRT_PT_Panel,
+    AIRT_PT_SourcePanel,
     AIRT_PT_MaterialPanel,
     AIRT_PT_AudioPanel,
     AIRT_PT_AdvancedPanel,

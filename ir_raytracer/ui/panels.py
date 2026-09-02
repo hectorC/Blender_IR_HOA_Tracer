@@ -4,6 +4,7 @@ from __future__ import annotations
 import bpy
 
 from ..core.acoustics import BAND_LABELS
+from ..core.ambisonic import get_ambi_channel_names
 
 
 class _AIRTPanel:
@@ -58,6 +59,83 @@ class AIRT_PT_Panel(_AIRTPanel, bpy.types.Panel):
             render.label(text="Rendering acoustic IR…", icon='TIME')
         elif scene.airt_last_render_summary:
             render.label(text=scene.airt_last_render_summary, icon='CHECKMARK')
+
+
+class AIRT_PT_SourcePanel(_AIRTPanel, bpy.types.Panel):
+    bl_idname = "AIRT_PT_source"
+    bl_label = "Source Radiation"
+    bl_parent_id = "AIRT_PT_main"
+
+    @classmethod
+    def poll(cls, context):
+        scene = context.scene
+        if scene.airt_source_object is not None:
+            return True
+        return any(
+            getattr(obj, 'is_acoustic_source', False)
+            for obj in scene.objects
+        )
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+        source = scene.airt_source_object
+        if source is None:
+            source = next((
+                obj for obj in scene.objects
+                if getattr(obj, 'is_acoustic_source', False)
+            ), None)
+        if source is None:
+            return
+
+        layout.label(text=f"Source: {source.name}", icon='OUTLINER_OB_SPEAKER')
+        layout.prop(source, "airt_source_directivity")
+        if source.airt_source_directivity == 'OMNI':
+            layout.label(
+                text="Rotation has no effect on an even radiation shape",
+                icon='INFO',
+            )
+            return
+
+        layout.label(
+            text="Source local -Y points forward; rotate the object to aim",
+            icon='ORIENTATION_LOCAL',
+        )
+        if source.airt_source_directivity == 'FORWARD_CONE':
+            layout.prop(source, "airt_source_cone_width_deg")
+
+        layout.prop(source, "show_source_directivity_details", toggle=True)
+        if source.show_source_directivity_details:
+            tonal = layout.box()
+            tonal.label(text="Directional focus: Even 0 — Shaped 1")
+            for index, label in enumerate(BAND_LABELS):
+                tonal.prop(
+                    source,
+                    "airt_source_directivity_bands",
+                    index=index,
+                    text=label,
+                    slider=True,
+                )
+
+        if source.airt_source_directivity == 'CUSTOM_SH':
+            custom = layout.box()
+            custom.label(text="Advanced 3D Shape — signed AmbiX weights")
+            names = get_ambi_channel_names()
+            for row_index in range(0, len(names), 2):
+                row = custom.row(align=True)
+                row.prop(
+                    source,
+                    "airt_source_directivity_sh",
+                    index=row_index,
+                    text=names[row_index],
+                )
+                if row_index + 1 < len(names):
+                    row.prop(
+                        source,
+                        "airt_source_directivity_sh",
+                        index=row_index + 1,
+                        text=names[row_index + 1],
+                    )
 
 
 class AIRT_PT_MaterialPanel(_AIRTPanel, bpy.types.Panel):

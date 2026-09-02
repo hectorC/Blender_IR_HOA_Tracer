@@ -25,7 +25,9 @@ from ir_raytracer.core.synthesis import AcousticEvent  # noqa: E402
 from ir_raytracer.utils.scene_utils import AcousticFace, AcousticScene  # noqa: E402
 
 
-def _candidate(delay, direction, energy, surface_id=1, order=1):
+def _candidate(
+    delay, direction, energy, surface_id=1, order=1, pressure_sign=None
+):
     return _EarlyPathCandidate(
         AcousticEvent(
             delay_seconds=delay,
@@ -33,6 +35,11 @@ def _candidate(delay, direction, energy, surface_id=1, order=1):
             energy_bands=np.full(NUM_BANDS, energy, dtype=np.float32),
             kind='EARLY',
             order=order,
+            pressure_sign_bands=(
+                None
+                if pressure_sign is None
+                else np.full(NUM_BANDS, pressure_sign, dtype=np.float32)
+            ),
         ),
         surface_id,
     )
@@ -61,6 +68,25 @@ class EarlyPathClusteringTests(unittest.TestCase):
         ]
         events = _cluster_unresolved_early_paths(candidates)
         self.assertEqual(len(events), 4)
+
+    def test_cluster_keeps_polarity_of_its_strongest_path(self):
+        candidates = [
+            _candidate(
+                0.40000, (0.0, 0.0, -1.0), 0.30,
+                pressure_sign=-1.0,
+            ),
+            _candidate(
+                0.40005, (0.02, 0.0, -1.0), 0.20,
+                pressure_sign=1.0,
+            ),
+        ]
+        events = _cluster_unresolved_early_paths(candidates)
+
+        self.assertEqual(len(events), 1)
+        np.testing.assert_array_equal(
+            events[0].pressure_sign_bands,
+            -np.ones(NUM_BANDS, dtype=np.float32),
+        )
 
     def test_reflection_orders_are_never_clustered_together(self):
         candidates = [

@@ -25,6 +25,9 @@ from ir_raytracer.core.acoustics import (  # noqa: E402
     MATERIAL_PRESETS,
     MaterialProperties,
 )
+from ir_raytracer.core.directivity import (  # noqa: E402
+    DIRECTIVITY_STRENGTH_PRESETS,
+)
 from ir_raytracer.core.ray_tracer import AmbisonicIREngine  # noqa: E402
 from ir_raytracer.utils.scene_utils import (  # noqa: E402
     build_acoustic_scene,
@@ -156,7 +159,9 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
             location=(0.0, 0.0, 0.0),
             rotation=(0.0, pi / 2.0, 0.0),
         )
-        self._endpoint("Source", (-3.0, 0.0, 0.0), source=True)
+        source_object = self._endpoint(
+            "Source", (-3.0, 0.0, 0.0), source=True
+        )
         self._endpoint("Receiver", (3.0, 0.0, 0.0))
 
         scene = bpy.context.scene
@@ -170,6 +175,19 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
         result = self._render('REFLECTIONS')
         self.assertGreater(result.transport.diffraction_events, 0)
         self.assertGreater(float(np.max(np.abs(result.ir))), 0.0)
+
+        source_object.airt_source_directivity = 'FORWARD_CONE'
+        source_object.rotation_euler.z = -pi / 2.0
+        bpy.context.view_layer.update()
+        engine = AmbisonicIREngine(bpy.context)
+        shadowed = engine._direct_or_diffraction_events(
+            object_world_position(bpy.context, source_object),
+            object_world_position(
+                bpy.context, bpy.context.scene.airt_receiver_object
+            ),
+        )
+        self.assertEqual(shadowed, [])
+        self.assertEqual(engine.tracer.stats.diffraction_events, 0)
 
     def test_evaluated_parent_transform_drives_endpoint_position(self):
         parent = bpy.data.objects.new("Parent", None)
@@ -215,6 +233,21 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
         # With the option disabled, Blender world +X remains AmbiX left.
         self.assertAlmostEqual(float(np.sum(world_aligned.ir[1])), 1.0, places=5)
         self.assertAlmostEqual(float(np.sum(world_aligned.ir[3])), 0.0, places=5)
+
+    def test_source_rotation_aims_radiation_without_rotating_sound_field(self):
+        source = self._endpoint("Source", (0.0, 1.0, 0.0), source=True)
+        self._endpoint("Receiver", (0.0, 0.0, 0.0))
+        source.airt_source_directivity = 'CARDIOID'
+        front = self._render('FULL')
+
+        source.rotation_euler.z = pi
+        bpy.context.view_layer.update()
+        rear = self._render('FULL')
+
+        self.assertEqual(front.transport.direct_events, 1)
+        self.assertAlmostEqual(float(np.sum(front.ir[0])), 1.0, places=5)
+        self.assertEqual(rear.transport.direct_events, 0)
+        np.testing.assert_array_equal(rear.ir, np.zeros_like(rear.ir))
 
     def test_scene_builder_uses_evaluated_world_geometry(self):
         room = self._room()
@@ -454,6 +487,23 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
         finally:
             bpy.data.scenes.remove(scene)
 
+    def test_source_radiation_defaults_are_neutral_and_presets_shape_bands(self):
+        source = bpy.data.objects.new("Radiation Defaults", None)
+        self.assertEqual(source.airt_source_directivity, 'OMNI')
+        np.testing.assert_allclose(
+            tuple(source.airt_source_directivity_bands), 0.0
+        )
+
+        source.airt_source_directivity = 'LOUDSPEAKER'
+        np.testing.assert_allclose(
+            tuple(source.airt_source_directivity_bands),
+            DIRECTIVITY_STRENGTH_PRESETS['LOUDSPEAKER'],
+        )
+        self.assertGreater(
+            source.airt_source_directivity_bands[-1],
+            source.airt_source_directivity_bands[0],
+        )
+
     def test_every_artist_facing_control_has_tooltip_text(self):
         owner_properties = {
             'absorption',
@@ -465,6 +515,7 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
             'show_frequency_details',
             'is_acoustic_source',
             'is_acoustic_receiver',
+            'show_source_directivity_details',
         }
         discovered = []
         for owner_type in (
@@ -603,6 +654,30 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
         self.assertEqual(engine.tracer.stats.early_sequences_tested, 6)
         self.assertEqual(engine.tracer.stats.early_orders_skipped, 0)
 
+    def test_source_beam_selects_deterministic_reflector_direction(self):
+        scene = bpy.context.scene
+        scene.airt_ir_seconds = 1.0
+        scene.airt_output_content = 'REFLECTIONS'
+        scene.airt_early_order = 1
+        source = self._endpoint("Source", (2.0, -1.0, 0.0), source=True)
+        self._endpoint("Receiver", (7.0, 1.0, 0.0))
+        self._specular_wall("Wall A", 0.0)
+        self._specular_wall("Wall B", 10.0)
+        source.airt_source_directivity = 'FORWARD_CONE'
+        source.rotation_euler.z = pi / 2.0
+        bpy.context.view_layer.update()
+
+        engine = AmbisonicIREngine(bpy.context)
+        events = engine._first_order_specular_events(
+            object_world_position(bpy.context, source),
+            object_world_position(
+                bpy.context, bpy.context.scene.airt_receiver_object
+            ),
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertGreater(float(np.max(events[0].energy_bands)), 0.0)
+
     def test_opaque_divider_blocks_multi_order_image_paths(self):
         scene = bpy.context.scene
         scene.airt_ir_seconds = 1.0
@@ -625,8 +700,9 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
         import soundfile
 
         self._room()
-        self._endpoint("Source", (-1.0, 0.0, 0.0), source=True)
+        source = self._endpoint("Source", (-1.0, 0.0, 0.0), source=True)
         self._endpoint("Receiver", (1.0, 0.5, 0.0))
+        source.airt_source_directivity = 'LOUDSPEAKER'
         scene = bpy.context.scene
         scene.airt_output_content = 'FULL'
         scene.airt_ir_seconds = 0.1
@@ -644,6 +720,15 @@ class BlenderSceneIntegrationTests(unittest.TestCase):
                 metadata = json.load(metadata_file)
             self.assertEqual(metadata["channel_convention"], "ACN/SN3D (AmbiX)")
             self.assertEqual(len(metadata["channels"]), 16)
+            self.assertEqual(
+                metadata["source_directivity"]["pattern"], "LOUDSPEAKER"
+            )
+            self.assertEqual(
+                metadata["source_directivity"]["forward_axis"], "-Y"
+            )
+            self.assertEqual(
+                len(metadata["source_directivity"]["strength_bands"]), 7
+            )
             self.assertEqual(metadata["deterministic_reflection_order"], 2)
             self.assertGreater(
                 metadata["deterministic_path_stats"]["surface_sequences_tested"],

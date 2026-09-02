@@ -25,6 +25,7 @@ class AcousticEvent:
     energy_bands: np.ndarray
     kind: str
     order: int = 0
+    pressure_sign_bands: np.ndarray | None = None
 
 
 @dataclass
@@ -40,6 +41,36 @@ def _gain_for_event(kind: str, early_gain: float, diffuse_gain: float) -> float:
     if kind == 'EARLY':
         return early_gain
     return 1.0
+
+
+def _add_signed_filtered_impulse(
+    result: np.ndarray,
+    ambisonic: np.ndarray,
+    delay_samples: float,
+    pressure_bands: np.ndarray,
+    sample_rate: int,
+) -> None:
+    """Reconstruct a causal spectrum that may change pressure polarity."""
+    positive = np.maximum(pressure_bands, 0.0)
+    negative = np.maximum(-pressure_bands, 0.0)
+    if np.any(positive > 1e-12):
+        add_filtered_impulse(
+            result,
+            ambisonic,
+            delay_samples,
+            1.0,
+            positive,
+            sample_rate,
+        )
+    if np.any(negative > 1e-12):
+        add_filtered_impulse(
+            result,
+            ambisonic,
+            delay_samples,
+            -1.0,
+            negative,
+            sample_rate,
+        )
 
 
 def synthesize_ambisonic_ir(
@@ -75,15 +106,20 @@ def synthesize_ambisonic_ir(
         if energy.shape != (NUM_BANDS,) or not np.any(energy > 1e-20):
             continue
         pressure = np.sqrt(energy).astype(np.float32)
+        if event.pressure_sign_bands is not None:
+            signs = np.asarray(
+                event.pressure_sign_bands, dtype=np.float32
+            )
+            if signs.shape == (NUM_BANDS,):
+                pressure *= np.where(signs < 0.0, -1.0, 1.0)
         pressure *= _gain_for_event(event.kind, early_gain, diffuse_gain)
         ambisonic = encoder.encode(event.arrival_direction)
 
         if event.kind != 'DIFFUSE':
-            add_filtered_impulse(
+            _add_signed_filtered_impulse(
                 result,
                 ambisonic,
                 delay_samples,
-                1.0,
                 pressure,
                 sample_rate,
             )

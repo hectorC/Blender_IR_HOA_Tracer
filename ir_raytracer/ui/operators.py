@@ -187,6 +187,7 @@ class AIRT_OT_RenderIR(bpy.types.Operator):
             "receiver": receiver_object.name,
             "source_position_bu": list(source),
             "receiver_position_bu": list(receiver),
+            "source_directivity": config.source_directivity.metadata(),
             "content": scene.airt_output_content,
             "quality": scene.airt_quality_preset,
             "listener_rays": config.ray_count,

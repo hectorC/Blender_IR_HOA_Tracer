@@ -46,6 +46,29 @@ class SynthesisTests(unittest.TestCase):
         self.assertEqual(int(np.argmax(np.abs(ir[0]))), 480)
         self.assertAlmostEqual(float(ir[0, 480]), 0.5, places=5)
 
+    def test_signed_directivity_reverses_deterministic_pressure(self):
+        positive = AcousticEvent(
+            delay_seconds=0.01,
+            arrival_direction=Vector((1.0, 0.0, 0.0)),
+            energy_bands=np.full(NUM_BANDS, 0.25, dtype=np.float32),
+            kind='DIRECT',
+            pressure_sign_bands=np.ones(NUM_BANDS, dtype=np.float32),
+        )
+        negative = AcousticEvent(
+            delay_seconds=positive.delay_seconds,
+            arrival_direction=positive.arrival_direction,
+            energy_bands=positive.energy_bands,
+            kind='DIRECT',
+            pressure_sign_bands=-np.ones(NUM_BANDS, dtype=np.float32),
+        )
+        positive_ir, _ = synthesize_ambisonic_ir(
+            [positive], 48000, 0.05, AmbisonicEncoder()
+        )
+        negative_ir, _ = synthesize_ambisonic_ir(
+            [negative], 48000, 0.05, AmbisonicEncoder()
+        )
+        np.testing.assert_allclose(negative_ir, -positive_ir, atol=1e-7)
+
     def test_diffuse_phase_is_repeatable_for_a_seed(self):
         events = [
             AcousticEvent(

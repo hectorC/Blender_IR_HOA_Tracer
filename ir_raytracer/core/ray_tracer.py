@@ -1,7 +1,7 @@
 """Receiver-centric acoustic energy transport and ambisonic IR rendering."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import cos, pi, sin, sqrt
 from typing import Callable, Iterator, List, Optional, Sequence, Tuple
 
@@ -19,6 +19,7 @@ from .diffraction import (
     find_diffraction_paths,
     maekawa_diffraction_gains,
 )
+from .directivity import SourceDirectivity, source_directivity_from_object
 from .synthesis import AcousticEvent, SynthesisStats, synthesize_ambisonic_ir
 from ..utils.math_utils import reflect
 from ..utils.scene_utils import (
@@ -62,6 +63,9 @@ class AcousticRenderConfig:
     early_gain_db: float
     diffuse_gain_db: float
     encoder: AmbisonicEncoder
+    source_directivity: SourceDirectivity = field(
+        default_factory=SourceDirectivity
+    )
     eps: float = 1e-4
 
     @classmethod
@@ -73,6 +77,12 @@ class AcousticRenderConfig:
         use_receiver_orientation = bool(
             getattr(scene, 'airt_use_receiver_orientation', True)
         )
+        source_object = getattr(scene, 'airt_source_object', None)
+        if source_object is None:
+            source_object = next((
+                obj for obj in scene.objects
+                if getattr(obj, 'is_acoustic_source', False)
+            ), None)
         receiver_object = getattr(scene, 'airt_receiver_object', None)
         if receiver_object is None:
             receiver_object = next((
@@ -123,6 +133,14 @@ class AcousticRenderConfig:
                 float(getattr(scene, 'airt_yaw_offset_deg', 0.0)),
                 bool(getattr(scene, 'airt_invert_z', False)),
                 receiver_rotation,
+            ),
+            source_directivity=source_directivity_from_object(
+                source_object,
+                (
+                    object_world_rotation(context, source_object)
+                    if source_object is not None
+                    else None
+                ),
             ),
         )
 
@@ -307,6 +325,18 @@ def _cluster_unresolved_early_paths(
             np.maximum(candidate.event.energy_bands, 0.0)
             for candidate in cluster
         ]).astype(np.float64)
+        signs = np.stack([
+            (
+                candidate.event.pressure_sign_bands
+                if candidate.event.pressure_sign_bands is not None
+                else np.ones(NUM_BANDS, dtype=np.float32)
+            )
+            for candidate in cluster
+        ]).astype(np.float32)
+        strongest_indices = np.argmax(energies, axis=0)
+        strongest_signs = signs[
+            strongest_indices, np.arange(NUM_BANDS)
+        ]
         weights = np.maximum(np.mean(energies, axis=1), 1e-20)
         delay = float(np.average(
             [candidate.event.delay_seconds for candidate in cluster],
@@ -325,6 +355,7 @@ def _cluster_unresolved_early_paths(
             energy_bands=np.max(energies, axis=0).astype(np.float32),
             kind='EARLY',
             order=cluster[0].event.order,
+            pressure_sign_bands=strongest_signs,
         ))
     return events
 
@@ -559,12 +590,18 @@ class ReceiverPathTracer:
         )
         total_distance_bu = path_distance_bu + source_distance_bu
         angular_sample_weight = 4.0 * pi / float(self.config.ray_count)
+        source_energy_gain, source_polarity = (
+            self.config.source_directivity.energy_gain_and_polarity(
+                -source_direction
+            )
+        )
         energy = (
             throughput
             * visibility
             * brdf
             * cosine_incident
             * angular_sample_weight
+            * source_energy_gain
             / (source_distance_m * source_distance_m)
             * self._air_energy(total_distance_bu)
         )
@@ -577,6 +614,7 @@ class ReceiverPathTracer:
             energy_bands=energy.astype(np.float32),
             kind='DIFFUSE',
             order=bounce + 1,
+            pressure_sign_bands=source_polarity,
         )
 
     def trace(
@@ -711,19 +749,29 @@ class AmbisonicIREngine:
         if np.any(visibility > 1e-10):
             if self.config.output_content == 'FULL':
                 distance_m = distance_bu * self.config.unit_scale
+                source_energy_gain, source_polarity = (
+                    self.config.source_directivity.energy_gain_and_polarity(
+                        -direction
+                    )
+                )
                 energy = (
                     visibility
+                    * source_energy_gain
                     * self._air_energy(distance_bu)
                     / max(distance_m * distance_m, 1e-12)
                 )
-                events.append(AcousticEvent(
-                    delay_seconds=distance_bu / self.config.speed_of_sound_bu,
-                    arrival_direction=direction.normalized(),
-                    energy_bands=energy.astype(np.float32),
-                    kind='DIRECT',
-                    order=0,
-                ))
-                self.tracer.stats.direct_events += 1
+                if np.any(energy > 1e-16):
+                    events.append(AcousticEvent(
+                        delay_seconds=(
+                            distance_bu / self.config.speed_of_sound_bu
+                        ),
+                        arrival_direction=direction.normalized(),
+                        energy_bands=energy.astype(np.float32),
+                        kind='DIRECT',
+                        order=0,
+                        pressure_sign_bands=source_polarity,
+                    ))
+                    self.tracer.stats.direct_events += 1
             return events
 
         if (
@@ -762,17 +810,26 @@ class AmbisonicIREngine:
                 self.config.diffraction_max_angle_rad,
             )
             distance_m = path.distance_bu * self.config.unit_scale
+            source_energy_gain, source_polarity = (
+                self.config.source_directivity.energy_gain_and_polarity(
+                    path.point - source
+                )
+            )
             energy = (
                 pressure_gain * pressure_gain
+                * source_energy_gain
                 * self._air_energy(path.distance_bu)
                 / max(distance_m * distance_m * max(len(paths), 1), 1e-12)
             )
+            if not np.any(energy > 1e-16):
+                continue
             events.append(AcousticEvent(
                 delay_seconds=path.distance_bu / self.config.speed_of_sound_bu,
                 arrival_direction=(path.point - receiver).normalized(),
                 energy_bands=energy.astype(np.float32),
                 kind='EARLY',
                 order=0,
+                pressure_sign_bands=source_polarity,
             ))
             self.tracer.stats.diffraction_events += 1
         return events
@@ -954,12 +1011,20 @@ class AmbisonicIREngine:
                     continue
 
                 distance_m = total_distance_bu * self.config.unit_scale
+                source_energy_gain, source_polarity = (
+                    self.config.source_directivity.energy_gain_and_polarity(
+                        reflection_points[0] - source
+                    )
+                )
                 energy = (
                     specular_energy
                     * visibility
+                    * source_energy_gain
                     * self._air_energy(total_distance_bu)
                     / max(distance_m * distance_m, 1e-12)
                 )
+                if not np.any(energy > 1e-16):
+                    continue
                 candidates.append(_EarlyPathCandidate(
                     event=AcousticEvent(
                         delay_seconds=(
@@ -971,6 +1036,7 @@ class AmbisonicIREngine:
                         energy_bands=energy.astype(np.float32),
                         kind='EARLY',
                         order=order,
+                        pressure_sign_bands=source_polarity,
                     ),
                     surface_id=tuple(
                         id(surfaces[index].object_ref) for index in sequence

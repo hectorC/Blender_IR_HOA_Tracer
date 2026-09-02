@@ -19,6 +19,8 @@ Version 2 uses one receiver-centric acoustic energy renderer. It no longer
 crossfades unrelated forward and reverse simulations.
 
 - Direct sound is evaluated deterministically, including per-band transmission.
+- Source radiation is evaluated in the source object's local frame for every
+  direct, reflected, and diffracted path, with frequency-dependent focus.
 - Planar specular reflections are found deterministically with finite image
   sources through a selectable first, second, or third order.
 - Remaining reflected energy is sampled from the receiver with diffuse,
@@ -49,12 +51,14 @@ Diagnostics panel can confirm that `soundfile` is available.
 
 1. Model a closed or partly open space at a meaningful Blender unit scale.
 2. Select an object at the emitter position and choose **Use Active as Source**.
-3. Select an object at the listening position and choose **Use Active as
+3. In **Source Radiation**, keep the neutral even pattern or choose and aim a
+   directional shape. Source-local `-Y` is forward.
+4. Select an object at the listening position and choose **Use Active as
    Receiver**. Empty objects work well for both endpoints.
-4. Select each acoustic mesh and choose an Acoustic Material preset. Expand
+5. Select each acoustic mesh and choose an Acoustic Material preset. Expand
    **Manual Band Details** when frequency-specific shaping is wanted.
-5. Choose IR content, duration, sample rate, quality, and an output path.
-6. Run **Validate Acoustic Scene**, then **Render Ambisonic IR**.
+6. Choose IR content, duration, sample rate, quality, and an output path.
+7. Run **Validate Acoustic Scene**, then **Render Ambisonic IR**.
 
 The renderer uses evaluated world-space geometry and endpoint transforms, so
 parenting, modifiers, and object transforms are respected. Source and receiver
@@ -83,6 +87,7 @@ The defaults are intended as a useful first listening render:
 | Sample rate | 48 kHz | Good general production rate |
 | Duration | 2.0 s | Increase for large or highly reflective spaces |
 | Content | Full IR | Change to Wet or Diffuse for send effects |
+| Source radiation | Even in Every Direction | Neutral and independent of source rotation |
 | Early reflections | On, order 2 | Resolves first- and second-order specular paths cleanly |
 | Air absorption | On | 20 C, 50% RH, 101.325 kPa |
 | Random seed | 1 | Repeatable comparison between scene edits |
@@ -174,6 +179,30 @@ Thin transmissive surfaces are an artistic abstraction. A wall modeled with two
 faces can apply transmission twice, and the diffraction model handles one edge
 rather than a sequence of edges.
 
+## Source radiation
+
+Each source object can project sound with **Even in Every Direction**,
+**Forward Focus**, **Front and Back**, **Focused Beam**,
+**Loudspeaker-like**, or an advanced **Custom 3D Pattern**. The selected shape
+affects the direct arrival, deterministic early reflections, stochastic
+reflections, and diffraction from the direction in which the sound first
+leaves the source. This lets turning a source change both the early geometry
+and the reverberant field instead of acting as a direct-sound-only effect.
+
+Source-local `-Y` is the forward axis, `+X` is left, and `+Z` is up. The
+evaluated world rotation is used, including parent rotation. Scale does not
+alter the pattern. **Tone by Frequency** blends each band between an even spread
+at 0 and the selected shape at 1. The Loudspeaker-like starting curve therefore
+spreads bass broadly while aiming mids and treble more strongly.
+
+Radiation shapes are normalized so their strongest direction retains unity
+pressure. Choosing a directional shape does not automatically make its forward
+sound louder than the even default; it reduces off-axis energy. Front and Back
+and Custom 3D patterns can carry signed pressure, so opposite lobes may reverse
+polarity. Focused Beam's width is specified at 6 dB below its on-axis pressure.
+Custom 3D Pattern uses 16 signed third-order ACN/SN3D coefficients and is
+peak-normalized after the shape is assembled.
+
 ## Ambisonic format and orientation
 
 Output WAV files always contain 16 planar channels in ACN order with SN3D
@@ -202,7 +231,9 @@ receiver, render settings, normalization gain, and event counts.
   geometry may reach the user-configurable early-path budget.
 - Diffraction is a bounded, single-edge approximation and is disabled by
   default.
-- Point source and point receiver directivity are currently omnidirectional.
+- Sources and receivers remain ideal points. Source radiation does not model
+  the near field, cabinet edge diffraction, or the physical size of a radiator;
+  receiver directivity is not modeled.
 - Acoustic assignment follows evaluated polygon material indices; modifier
   configurations that discard or remap those indices necessarily change the
   resulting acoustic assignment.
@@ -225,5 +256,5 @@ the target Blender runtime:
 
 The test suite checks ACN/SN3D encoding, air attenuation, complementary-band
 synthesis, energy sampling, multi-order finite image-source paths, direct-path
-calibration, content separation, diffraction, evaluated Blender geometry,
-repeatability, and output levels.
+calibration, source directivity and rotation, content separation, diffraction,
+evaluated Blender geometry, repeatability, and output levels.
