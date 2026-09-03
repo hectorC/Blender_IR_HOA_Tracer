@@ -10,16 +10,17 @@ software and should not be used for building or safety decisions.
 
 ## Current architecture
 
-Version 2.2 uses a coherent deterministic front end and one bidirectional
+Version 2.3.0 uses a coherent deterministic front end and one bidirectional
 acoustic-energy renderer. It does not crossfade unrelated simulations.
 
 - Direct sound is evaluated deterministically, including per-band transmission.
 - Source radiation is evaluated in the source object's local frame for every
   direct, reflected, and diffracted path, with frequency-dependent focus.
 - Planar specular reflections are found deterministically with finite image
-  sources through a selectable first, second, or third order. Their signed
-  pressure transfer is evaluated at the real angle of incidence using a simple
-  passive wall impedance inferred from each material's absorption bands.
+  sources through a selectable first, second, or third order. With
+  **Pressure-Coherent Early Paths** enabled, their signed pressure transfer is
+  evaluated at the real angle of incidence using a simple passive wall
+  impedance inferred from each material's reflected-energy bands.
 - Remaining reflected energy is sampled from both source and receiver with
   diffuse, glossy, absorptive, and transmissive surface interactions. Retained
   subpaths are joined to reveal routes that one-ended sampling finds rarely.
@@ -43,9 +44,30 @@ diffuse components a single geometry and level convention.
 - `numpy` (included with Blender)
 - `soundfile` in Blender's Python environment for multichannel WAV export
 
-Install the `ir_raytracer` directory as a Blender extension/add-on, enable
-**Ambisonic IR Tracer**, and open **3D Viewport > Sidebar > IR Tracer**. The
-Diagnostics panel can confirm that `soundfile` is available.
+This repository contains a **legacy Python add-on**, not a packaged Blender
+extension: registration uses `bl_info`, and there is no extension manifest.
+
+1. Install `soundfile` into the Python environment used by Blender, not merely
+   into your system Python. For the default Windows installation:
+
+   ```powershell
+   & 'C:\Program Files\Blender Foundation\Blender 5.2\5.2\python\bin\python.exe' -m pip install soundfile
+   ```
+
+   Adjust the path for your installation; writing under Program Files may
+   require an elevated terminal.
+2. Create a ZIP containing the `ir_raytracer/` folder at its root, with
+   `ir_raytracer/__init__.py` and its `core/`, `ui/`, and `utils/` subfolders.
+   Do not zip only `__init__.py` or add an extra repository-folder wrapper.
+3. In **Edit > Preferences > Add-ons**, use **Install from Disk** to select that
+   ZIP, then enable **Ambisonic IR Tracer**. See Blender's
+   [legacy add-on installation guide](https://docs.blender.org/manual/en/5.2/editors/preferences/addons.html#installing-legacy-add-ons).
+4. Open **3D Viewport > Sidebar > IR Tracer**. The **Diagnostics** panel's
+   **Check Audio Dependency** action confirms whether `soundfile` is available.
+
+Updating the Git checkout does not update a separately installed add-on copy.
+Reinstall the updated package or synchronize the installed `ir_raytracer/`
+folder, then restart Blender before testing the new code.
 
 ## Basic workflow
 
@@ -60,9 +82,34 @@ Diagnostics panel can confirm that `soundfile` is available.
 6. Choose IR content, duration, sample rate, quality, and an output path.
 7. Run **Validate Acoustic Scene**, then **Render Ambisonic IR**.
 
-The renderer uses evaluated world-space geometry and endpoint transforms, so
-parenting, modifiers, and object transforms are respected. Source and receiver
-objects themselves are excluded from acoustic geometry.
+### Geometry and endpoint objects
+
+Each render uses one source and one receiver at their **evaluated object
+origins**, not at their mesh centers or surfaces. They are ideal points: their
+shape, dimensions, and object scale do not define a radiating area or listening
+radius. Rotation aims source radiation and, when enabled, orients the receiver's
+sound field. Parent transforms can change the endpoints' world positions and
+orientations; scaling a parent can therefore move a child endpoint indirectly.
+
+The acoustic scene uses **visible mesh objects in the current view layer**,
+with evaluated modifiers and world transforms. Viewport-hidden meshes are
+excluded; the render-visibility flag alone is not the acoustic inclusion switch.
+Convert non-mesh objects such as curves or text to meshes to include them.
+Scene **Unit Scale** determines physical distances: at 1.0, one Blender unit
+represents one metre. Room dimensions and scene unit scale affect travel time,
+distance level, and air loss; endpoint display size does not.
+
+Single-surface walls work from either side; thickness is not required for
+reflection or occlusion. Keep endpoint origins off the surfaces themselves.
+A panel with zero Transmission blocks a direct path that intersects it, while
+indirect routes may still reach the receiver. Optional edge diffraction is
+considered only when the straight path is blocked in every frequency band.
+
+Use the assignment buttons for mesh endpoints so they are tagged and excluded
+from both reflection and diffraction geometry. Selecting an untagged mesh only
+through a Source/Receiver dropdown excludes it from the reflection mesh, but
+the current diffraction extractor can still see its edges. Empties avoid this
+distinction entirely.
 
 ## IR content modes
 
@@ -77,6 +124,42 @@ Wet Reflections is useful when a dry signal will be mixed separately. Diffuse
 Field Only is deliberately less literal and is useful for spacious reverb beds
 or for combining with another early-reflection design.
 
+"Diffuse" here means the stochastic reflected component, which can include
+glossy/specular energy as well as material-scattered energy. It is not a
+guarantee of a perfectly diffuse field. Disabling **Deterministic Early
+Reflections** transfers specular coverage to the stochastic stage rather than
+removing all early reflected sound. The Content selector above Render and
+**IR Content** under **IR and Output** edit the same setting.
+
+## Duration and rendering
+
+**IR Duration** sets a fixed output window of **0.1 to 20 seconds**. It does not
+set a target reverberation time, apply an end fade, or detect when the room has
+fallen silent; setting it to zero does not enable automatic length detection.
+Initial propagation silence is retained, so the window must include travel time
+to the receiver as well as the wanted decay. Energy still sounding at the end
+is cut off. Choose a longer window if needed and apply an artistic fade in your
+audio editor if desired.
+
+The decay within that window follows material losses, air absorption, and
+escape through openings, subject to the numerical limits set by **Maximum
+Bounces**, **Minimum Path Energy**, and **Russian Roulette**. Increasing duration
+alone cannot restore paths already stopped by those limits.
+
+Interactive rendering snapshots the scene and runs acoustic processing in a
+worker thread, with a progress indicator and a last-render event summary.
+Changes made after the snapshot affect the next render, not the one underway.
+Scene preparation and WAV/JSON export still run on Blender's main thread and
+can briefly pause interaction. There is no dedicated render-cancel control;
+keep Blender open until completion. Background/scripted execution is synchronous.
+
+Event counts describe rendered arrivals, not polygon counts or reflection order.
+The reported **early** count includes deterministic specular and optional
+diffracted arrivals; **diffuse** counts stochastic arrivals. Zero early events
+does not mean zero reflected sound: check content mode, material scattering,
+path visibility, duration, and the early-path budget. The JSON sidecar records
+the highest deterministic order evaluated and any orders skipped by that budget.
+
 ## Recommended starting settings
 
 The defaults are intended as a useful first listening render:
@@ -89,20 +172,41 @@ The defaults are intended as a useful first listening render:
 | Content | Full IR | Change to Wet or Diffuse for send effects |
 | Source radiation | Even in Every Direction | Neutral and independent of source rotation |
 | Early reflections | On, order 2 | Resolves first- and second-order specular paths cleanly |
-| Coherent early pressure | On | Preserves angle-dependent level and polarity on distinct echoes |
+| Pressure-Coherent Early Paths | On | Preserves angle-dependent level and polarity on distinct echoes |
 | Bidirectional path search | On | Joins source and listener routes for better indirect coverage |
+| Early Path Budget | 1,000,000 | Per-order search limit for second- and third-order echoes |
+| Early Gain / Diffuse Gain | 0 dB / 0 dB | Neutral balance between distinct echoes and the stochastic wash |
 | Air absorption | On | 20 C, 50% RH, 101.325 kPa |
 | Random seed | 1 | Repeatable comparison between scene edits |
 | Edge diffraction | Off | Enable only when shadowing needs it |
-| Output | 32-bit float | Preserves the renderer's 1/r distance level |
+| Receiver orientation | On | Local +Y is front, -X is left, +Z is up; yaw 0 degrees, Z flip off |
+| WAV format | 32-bit float | Allows peaks above 0 dBFS without integer clipping |
+| Output level | Preserve Relative Level | Keeps the renderer's 1/r distance reference |
 
-Use **Preview** while moving geometry or auditioning materials. Use **High** for
-a smoother final tail. **Ultra High** uses 16,384 paths from each endpoint, 128
-bounces, join depth 8, later path roulette, and a lower energy cutoff for long
-or complex spaces. It only changes transport quality; sample rate, duration,
-and IR content remain under explicit user control. If the tail sounds grainy,
-raise Paths per Side before raising Maximum Bounces. If energy stops too soon,
-increase IR Duration and Maximum Bounces together.
+Use **Preview** (512 paths per side, 24 bounces, join depth 2) while moving
+geometry or auditioning materials. Use **High** (4,096 paths per side, 64 bounces,
+join depth 6) for a smoother final tail. **Ultra High** uses 16,384 paths from
+each endpoint, 128 bounces, join depth 8, later path roulette, and a lower energy
+cutoff for long or complex spaces. It only changes transport quality; sample
+rate, duration, and IR content remain under explicit user control. If the tail
+sounds grainy, raise Paths per Side before raising Maximum Bounces. If energy
+stops too soon, increase IR Duration and Maximum Bounces together.
+
+Quality presets change path count, bounce limit, join depth, roulette start and
+survival probability, and minimum path energy. They do not turn bidirectional
+search or roulette on/off, change deterministic order/budget, or alter materials.
+With bidirectional search disabled, Paths per Side launches receiver paths only.
+
+**Specular Roughness** (default 8 degrees) controls the spread of the glossy
+part of stochastic reflections. It does not replace a material's per-band
+**Unmodeled Scattering**, which sets the diffuse/specular energy split, and it
+does not broaden deterministic image-source echoes.
+
+**Russian Roulette** is enabled by default. In Balanced mode it starts at
+bounce 20, keeps each subsequent path with probability 0.97, and compensates
+surviving energy. Disabling it can reduce sampling variation at greater cost;
+it is not an intended decay-length or loudness control. Maximum Bounces and
+Minimum Path Energy (Balanced: `1e-6`) still apply.
 
 **Bidirectional Path Search** traces the same number of paths from the source
 and listener, then joins compatible surface points from the two searches.
@@ -122,24 +226,31 @@ of stochastic render quality. Order 2 is the default balance. Order 3 improves
 discrete echoes and localization in corridors, coupled rooms, and other strongly
 specular spaces, but its candidate count grows rapidly with the number of
 distinct reflector planes. Coplanar triangles on one object are grouped before
-enumeration. If an order exceeds **Early Path Budget**, that order and higher
-ones are omitted rather than partially sampling a directionally biased subset;
+enumeration. If second or third order exceeds **Early Path Budget**, that order
+and higher ones are omitted rather than partially sampling a biased subset;
 the render reports the highest completed order and records it in the JSON
-sidecar. Raising the budget is useful when the geometry is already acoustically
-simple and additional waiting time is acceptable. This hybrid division follows
-the perceptually motivated structure explored by [Johnson and Lee
+sidecar. First order is not budget-limited. The UI currently allows budgets
+from 1,000 to 20,000,000 candidate
+sequences per order. Raising the budget is useful when the geometry is already
+acoustically simple and additional waiting time is acceptable. Specular orders
+not searched deterministically remain in the stochastic stage. This hybrid
+division follows the perceptually motivated structure explored by [Johnson and Lee
 (2016)](https://eprints.hud.ac.uk/id/eprint/28645/).
 
-**Coherent Early Pressure** lets direct sound and deterministic specular echoes
-retain signed pressure rather than being reconstructed from energy with an
-arbitrary phase. Because the material library contains absorption rather than
-measured complex impedance, the renderer infers a passive, purely resistive
-locally reacting boundary in each band. This makes reflection strength and
+**Pressure-Coherent Early Paths** gives deterministic specular echoes an
+angle-dependent signed pressure response. Direct sound is always coherent,
+regardless of this option. Because the material library contains absorption
+rather than measured complex impedance, the renderer infers a passive, purely
+resistive locally reacting boundary in each band. This makes reflection strength and
 possible polarity change with incidence angle, especially near grazing. It is
 a more plausible audible boundary response, not a substitute for measured
 phase or impedance data. Turning the option off restores the simpler
 energy-magnitude treatment for deterministic reflections; direct sound remains
 coherent.
+
+**Early Gain** adjusts deterministic specular and diffracted arrivals;
+**Diffuse Gain** adjusts all stochastic arrivals. Neither changes the direct
+arrival. Both default to 0 dB.
 
 **Preserve Relative Level** is the default so Full IR exports retain distance
 and material level differences. Float WAV is recommended because close sources
@@ -147,6 +258,10 @@ can exceed 0 dBFS in this mode. **Normalize for Audition** preserves
 interchannel and time relationships within one IR but raises its peak to the
 selected level, thereby removing its absolute distance reference. It is most
 appropriate for quickly auditioning Wet or Diffuse IRs.
+
+Levels are relative to a unit point source, not calibrated sound-pressure levels
+in dB SPL. There is no source loudness/nonlinearity model: a louder convolution
+input scales the result without changing the room's decay behavior.
 
 ## Acoustic materials
 
@@ -158,14 +273,23 @@ coefficient bands at 125, 250, 500, 1,000, 2,000, 4,000, and 8,000 Hz:
   specular behavior to represent surface detail absent from the acoustic mesh.
 - **Transmission** allows energy to continue through a surface.
 
-For every band, reflected energy is clamped to
-`1 - absorption - transmission`; scattering only changes the distribution of
-that reflection. Presets describe explicit constructions such as smooth painted
-concrete, plaster on lath, carpet with underlay, or rough cave rock. They are
+For every band, the stochastic reflected-energy fraction is
+`clamp(1 - absorption - transmission, 0, 1)`; scattering only changes the
+distribution of that reflection. The coherent early-path model uses this as
+its normal-incidence reference and varies pressure with incidence angle.
+Presets describe explicit constructions such as smooth painted concrete,
+plaster on lath, carpet with underlay, or rough cave rock. They are
 practical starting colors based on published room-acoustic material data, not
 laboratory specifications for a particular commercial product. The source data
 and construction-specific variation can be explored in the [ODEON material
 library](https://odeon.dk/download/materials/Material.Li8).
+
+The current library contains 22 named presets, including separate smooth,
+rough-cave, and porous/weathered rock; smooth and rough concrete; solid and
+cavity-backed wood; plaster, carpet, brick, glass, metal, tile/stone, gravel,
+sand/soil, folded curtains, mineral wool, calm water, and upholstered audience
+seating. Unassigned meshes use the **Custom** object fallback: absorption 0.2
+in every band, gentle frequency-dependent scattering, and zero transmission.
 
 Named presets are refreshed from the current library whenever a file loads, so
 calibration improvements also reach existing named assignments. Materials set
@@ -231,8 +355,11 @@ peak-normalized after the shape is assembled.
 
 ## Ambisonic format and orientation
 
-Output WAV files always contain 16 planar channels in ACN order with SN3D
+Output WAV files always contain 16 interleaved channels in ACN order with SN3D
 normalization (AmbiX): `W, Y, Z, X, V, T, R, S, U, Q, O, M, K, L, N, P`.
+Available sample rates are 44.1, 48, 96, and 192 kHz; WAV formats are 32-bit
+float and 24-bit PCM. Higher sample rates do not add acoustic material bands
+or increase the ambisonic order.
 
 **Use Receiver Orientation** is enabled by default. Every arrival is transformed
 into the receiver object's evaluated local rotation, including parent rotation,
@@ -246,7 +373,10 @@ ambisonic up axis after the receiver transform; **Flip Ambisonic Z** supports
 workflows with the opposite vertical convention.
 
 A JSON sidecar is written next to each WAV with the format, channels, source,
-receiver, render settings, normalization gain, and event counts.
+receiver, render settings, normalization gain, and event counts. It also records
+endpoint axes and rotations, source radiation, acoustic assignments, transport
+statistics, and deterministic search coverage. For `ambisonic_ir.wav` the
+sidecar is named `ambisonic_ir.wav.json`.
 
 ## Limitations
 
@@ -255,6 +385,10 @@ receiver, render settings, normalization gain, and event counts.
 - Explicit specular image sources are limited to third order. Their cost grows
   combinatorially with distinct reflector planes, so highly tessellated curved
   geometry may reach the user-configurable early-path budget.
+- Near-identical early paths from the same object sequence are consolidated
+  within 0.25 ms and 12 degrees, retaining the strongest per-band response. This
+  prevents facet-count-dependent level spikes but is not a physical caustic or
+  finite-surface wave model.
 - Early-reflection phase is inferred from absorption with a resistive boundary
   model; material-specific complex impedance and resonant phase are not yet
   represented.
@@ -285,11 +419,23 @@ the target Blender runtime:
 
 ```powershell
 & 'C:\Program Files\Blender Foundation\Blender 5.2\blender.exe' `
-  --background --factory-startup --python tests\run_blender_tests.py
+  --background --factory-startup --python-exit-code 1 `
+  --python tests\run_blender_tests.py
 ```
+
+Run this from the repository root. The runner imports the authoritative source,
+exercises Blender's actual add-on loader (including restricted registration
+access), and then discovers the regression tests. It does not depend on the
+separately installed add-on being up to date.
 
 The test suite checks ACN/SN3D encoding, air attenuation, complementary-band
 synthesis, coherent pressure transfer, reciprocal and joined path weighting,
 multi-order finite image-source paths, direct-path calibration, source
 directivity and rotation, content separation, diffraction, evaluated Blender
-geometry, repeatability, and output levels.
+geometry and material assignments, safe worker-thread snapshots, tooltips,
+repeatability, and WAV/JSON export. These are regression checks, not a listening
+study or acoustic-engineering validation.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE.txt).
