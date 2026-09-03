@@ -8,11 +8,6 @@ This is a creative, physics-inspired renderer. It aims for plausible spatial
 character and useful artistic control; it is not validated acoustic-engineering
 software and should not be used for building or safety decisions.
 
-> This project is also an experiment in AI-assisted software development. The
-> code and documentation should be treated critically and verified against your
-> own listening tests. Claims of accuracy require benchmarking that this project
-> has not performed.
-
 ## Current architecture
 
 Version 2.2 uses a coherent deterministic front end and one bidirectional
