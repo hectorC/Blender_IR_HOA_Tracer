@@ -10,8 +10,8 @@ software and should not be used for building or safety decisions.
 
 ## Current architecture
 
-Version 2.3.0 uses a coherent deterministic front end and one bidirectional
-acoustic-energy renderer. It does not crossfade unrelated simulations.
+Version 2.3.0 combines deterministic direct sound and specular reflections
+with bidirectional acoustic-energy transport.
 
 - Direct sound is evaluated deterministically, including per-band transmission.
 - Source radiation is evaluated in the source object's local frame for every
@@ -23,7 +23,7 @@ acoustic-energy renderer. It does not crossfade unrelated simulations.
   impedance inferred from each material's reflected-energy bands.
 - Remaining reflected energy is sampled from both source and receiver with
   diffuse, glossy, absorptive, and transmissive surface interactions. Retained
-  subpaths are joined to reveal routes that one-ended sampling finds rarely.
+  subpaths are joined to form additional source-to-receiver routes.
 - The receiver-only, source-only, and joined estimators are combined per path
   order with uniform multiple-importance weights. All-specular paths already
   covered by the image-source stage are omitted from the stochastic estimator.
@@ -34,9 +34,8 @@ acoustic-energy renderer. It does not crossfade unrelated simulations.
 - Optional bounded single-edge diffraction supplies a creative shadow-zone
   approximation.
 
-Separating coherent pressure paths from stochastic energy transport avoids
-treating unrelated late paths as phase-coherent and gives direct, early, and
-diffuse components a single geometry and level convention.
+Direct, early, and stochastic reflected components use the same scene geometry
+and level convention.
 
 ## Requirements and installation
 
@@ -121,21 +120,20 @@ distinction entirely.
   and diffraction. It contains only stochastic reflected energy.
 
 Wet Reflections is useful when a dry signal will be mixed separately. Diffuse
-Field Only is deliberately less literal and is useful for spacious reverb beds
-or for combining with another early-reflection design.
+Field Only is useful for reverb beds or for combining with a separate
+early-reflection design.
 
 "Diffuse" here means the stochastic reflected component, which can include
 glossy/specular energy as well as material-scattered energy. It is not a
-guarantee of a perfectly diffuse field. Disabling **Deterministic Early
-Reflections** transfers specular coverage to the stochastic stage rather than
-removing all early reflected sound. The Content selector above Render and
-**IR Content** under **IR and Output** edit the same setting.
+guarantee of a perfectly diffuse field. With **Deterministic Early Reflections**
+disabled, the stochastic stage handles specular coverage. The Content selector
+above Render and **IR Content** under **IR and Output** edit the same setting.
 
 ## Duration and rendering
 
-**IR Duration** sets a fixed output window of **0.1 to 20 seconds**. It does not
-set a target reverberation time, apply an end fade, or detect when the room has
-fallen silent; setting it to zero does not enable automatic length detection.
+**IR Duration** sets a fixed output window of **0.1 to 20 seconds**. Length is
+set manually; the renderer does not automatically trim silence or apply an end
+fade. Duration is an output limit, not a target reverberation time.
 Initial propagation silence is retained, so the window must include travel time
 to the receiver as well as the wanted decay. Energy still sounding at the end
 is cut off. Choose a longer window if needed and apply an artistic fade in your
@@ -214,38 +212,34 @@ and listener, then joins compatible surface points from the two searches.
 Increasing it can uncover longer routes through doorways, corridors, and
 coupled spaces, but the number of attempted joins grows approximately with the
 square of the depth. Multiple-importance weighting is applied separately at
-every total reflection order, so enabling additional strategies does not
-intentionally multiply the reverberant level. Joined routes still obey Maximum
-Bounces as a total path-order limit. At practical path counts, the source and
-listener endpoint estimates also provide a per-band energy reference for each
-order. This keeps a sparse set of successful joins from making the decay
-artificially shorter while retaining their timing and spatial information.
+every total reflection order. Joined routes obey Maximum Bounces as a total
+path-order limit. The combined energy at each order and frequency band is
+normalized to the average source and listener endpoint estimate; joined paths
+contribute timing and directional information.
 
 **Specular Order** controls the deterministic image-source depth independently
-of stochastic render quality. Order 2 is the default balance. Order 3 improves
-discrete echoes and localization in corridors, coupled rooms, and other strongly
-specular spaces, but its candidate count grows rapidly with the number of
-distinct reflector planes. Coplanar triangles on one object are grouped before
-enumeration. If second or third order exceeds **Early Path Budget**, that order
-and higher ones are omitted rather than partially sampling a biased subset;
-the render reports the highest completed order and records it in the JSON
-sidecar. First order is not budget-limited. The UI currently allows budgets
-from 1,000 to 20,000,000 candidate
-sequences per order. Raising the budget is useful when the geometry is already
-acoustically simple and additional waiting time is acceptable. Specular orders
-not searched deterministically remain in the stochastic stage. This hybrid
-division follows the perceptually motivated structure explored by [Johnson and Lee
+of stochastic render quality. Order 2 is the default. Order 3 includes paths
+with three consecutive specular reflections. Candidate count grows rapidly
+with the number of distinct reflector planes. Coplanar triangles on one object
+are grouped before enumeration. If second or third order exceeds **Early Path
+Budget**, that order and higher ones are skipped. The render reports the highest
+completed order and records it in the JSON sidecar. First order is not
+budget-limited. The UI allows budgets from 1,000 to 20,000,000 candidate sequences
+per order. Raising the budget is useful when the geometry is acoustically
+simple and additional waiting time is acceptable. Specular orders not searched
+deterministically remain in the stochastic stage. For background on the
+perceptual effects of image-source order, see [Johnson and Lee
 (2016)](https://eprints.hud.ac.uk/id/eprint/28645/).
 
 **Pressure-Coherent Early Paths** gives deterministic specular echoes an
 angle-dependent signed pressure response. Direct sound is always coherent,
 regardless of this option. Because the material library contains absorption
 rather than measured complex impedance, the renderer infers a passive, purely
-resistive locally reacting boundary in each band. This makes reflection strength and
-possible polarity change with incidence angle, especially near grazing. It is
-a more plausible audible boundary response, not a substitute for measured
-phase or impedance data. Turning the option off restores the simpler
-energy-magnitude treatment for deterministic reflections; direct sound remains
+resistive locally reacting boundary in each band. Reflection strength and
+polarity vary with incidence angle, especially near grazing. The response is
+inferred, not based on measured material phase or impedance. With the option
+disabled, deterministic reflection magnitudes come from reflected energy;
+source radiation still supplies pressure polarity, and direct sound remains
 coherent.
 
 **Early Gain** adjusts deterministic specular and diffracted arrivals;
@@ -291,9 +285,8 @@ sand/soil, folded curtains, mineral wool, calm water, and upholstered audience
 seating. Unassigned meshes use the **Custom** object fallback: absorption 0.2
 in every band, gentle frequency-dependent scattering, and zero transmission.
 
-Named presets are refreshed from the current library whenever a file loads, so
-calibration improvements also reach existing named assignments. Materials set
-to Custom retain their saved coefficients unchanged.
+Named presets are refreshed from the material library whenever a file loads.
+Materials set to Custom retain their saved coefficients unchanged.
 
 Evaluated mesh relief already changes reflection directions and must not be
 counted again as material scattering. Use higher scattering when a simplified
@@ -315,8 +308,7 @@ The Acoustic Material panel follows the object's active Blender material slot.
 Enable **Use Material Acoustics** to store coefficients on that material and use
 them for every evaluated polygon assigned to it. Faces with no material, an
 invalid slot, or a material whose acoustic option is disabled use the mesh
-object's acoustic settings as a fallback. This opt-in behavior preserves the
-sound of existing scenes that already use Blender materials for appearance.
+object's acoustic settings as a fallback.
 
 Material assignment is read from the evaluated mesh, after modifiers. A
 modifier can therefore preserve or generate distinct acoustic material regions
@@ -336,8 +328,8 @@ Each source object can project sound with **Even in Every Direction**,
 **Loudspeaker-like**, or an advanced **Custom 3D Pattern**. The selected shape
 affects the direct arrival, deterministic early reflections, stochastic
 reflections, and diffraction from the direction in which the sound first
-leaves the source. This lets turning a source change both the early geometry
-and the reverberant field instead of acting as a direct-sound-only effect.
+leaves the source. Turning a directional source changes its contribution to
+both distinct echoes and the reverberant field.
 
 Source-local `+Y` is the forward axis, `-X` is left, and `+Z` is up. The
 evaluated world rotation is used, including parent rotation. Scale does not
@@ -386,20 +378,18 @@ sidecar is named `ambisonic_ir.wav.json`.
   combinatorially with distinct reflector planes, so highly tessellated curved
   geometry may reach the user-configurable early-path budget.
 - Near-identical early paths from the same object sequence are consolidated
-  within 0.25 ms and 12 degrees, retaining the strongest per-band response. This
-  prevents facet-count-dependent level spikes but is not a physical caustic or
-  finite-surface wave model.
+  within 0.25 ms and 12 degrees, retaining the strongest per-band response.
+  This consolidation does not model physical caustics or finite-surface wave
+  behavior.
 - Early-reflection phase is inferred from absorption with a resistive boundary
-  model; material-specific complex impedance and resonant phase are not yet
+  model; material-specific complex impedance and resonant phase are not
   represented.
 - Bidirectional subpaths are randomly paired one-to-one and use uniform
-  order-wise MIS rather than a path-density balance or power heuristic. This
-  is stabilized against the average endpoint energy at each order and band. It
-  improves difficult-path coverage while keeping render time and memory
-  predictable, but it is not a general-purpose wave or spectral path tracer.
+  order-wise MIS, normalized against the average endpoint energy at each order
+  and band.
 - Diffraction is a bounded, single-edge approximation and is disabled by
   default.
-- Sources and receivers remain ideal points. Source radiation does not model
+- Sources and receivers are ideal points. Source radiation does not model
   the near field, cabinet edge diffraction, or the physical size of a radiator;
   receiver directivity is not modeled.
 - Acoustic assignment follows evaluated polygon material indices; modifier
@@ -408,9 +398,8 @@ sidecar is named `ambisonic_ir.wav.json`.
 - Stochastic tails converge progressively; identical nonzero seeds are
   repeatable, while seed zero intentionally creates a new realization.
 
-These constraints are intentional for the current artistic scope. Listening,
-decay-envelope inspection, and comparison with simple reference rooms remain
-important parts of using the tool.
+Use listening tests, decay-envelope inspection, and comparison with simple
+reference rooms to evaluate rendered results.
 
 ## Development and tests
 
