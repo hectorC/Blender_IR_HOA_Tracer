@@ -385,18 +385,21 @@ def _default_kernel_length(sr: int) -> int:
 
 
 @lru_cache(maxsize=16)
-def design_complementary_filter_bank(
+def design_power_complementary_filter_bank(
     sr: int, kernel_len: Optional[int] = None
 ) -> Tuple[np.ndarray, int]:
-    """Return a common-delay, complementary seven-band FIR bank.
+    """Return common-delay FIRs for independently randomized energy bands.
 
-    Adjacent bands crossfade linearly on a log-frequency axis. Because every
-    frequency-bin weight sums to one and each band receives the same window,
-    summing all seven impulse responses reconstructs a delayed unit impulse.
+    Sine/cosine crossovers on log frequency make squared magnitudes sum to
+    unity, not amplitudes. Equal band energies therefore reconstruct a flat
+    expected power spectrum. The finite Kaiser-windowed approximation stays
+    within 0.15 dB of unity power with the default length. The longer support
+    resolves the lowest (125 Hz) crossover; it is not a reverb decay or fade.
+    Remove the returned common delay when placing the filtered signal.
     """
     sr = max(1000, int(sr))
     if kernel_len is None:
-        kernel_len = _default_kernel_length(sr) | 1
+        kernel_len = max(129, int(round(sr * (4096.0 / 48000.0))) | 1)
     kernel_len = max(33, int(kernel_len) | 1)
     half = kernel_len // 2
     n_fft = max(4096, 1 << int(np.ceil(np.log2(kernel_len * 8))))
@@ -407,22 +410,17 @@ def design_complementary_filter_bank(
     weights[0, frequencies <= centers[0]] = 1.0
     weights[-1, frequencies >= centers[-1]] = 1.0
     for band in range(NUM_BANDS - 1):
-        mask = (frequencies > centers[band]) & (frequencies < centers[band + 1])
+        mask = (frequencies > centers[band]) & (frequencies <= centers[band + 1])
         if not np.any(mask):
             continue
         fraction = (
             np.log2(frequencies[mask] / centers[band])
             / np.log2(centers[band + 1] / centers[band])
         )
-        weights[band, mask] = 1.0 - fraction
-        weights[band + 1, mask] = fraction
-    for band, center in enumerate(centers):
-        nearest = int(np.argmin(np.abs(frequencies - center)))
-        weights[band, nearest] = 1.0
-        if band > 0:
-            weights[band - 1, nearest] = 0.0
+        weights[band, mask] = np.cos(0.5 * pi * fraction)
+        weights[band + 1, mask] = np.sin(0.5 * pi * fraction)
 
-    window = np.hanning(kernel_len)
+    window = np.kaiser(kernel_len, 8.6)
     kernels = np.empty((NUM_BANDS, kernel_len), dtype=np.float64)
     for band in range(NUM_BANDS):
         zero_phase = np.fft.irfft(weights[band], n=n_fft)
@@ -431,47 +429,87 @@ def design_complementary_filter_bank(
     return kernels.astype(np.float32), half
 
 
+# A compact, band-limited arrival has a small symmetric interpolation skirt.
+# Its centre stays at the acoustic arrival time; no global delay is added.
+FRACTIONAL_DELAY_HALF_WIDTH = 32
+
+
+@lru_cache(maxsize=1)
+def _fractional_delay_window() -> Tuple[np.ndarray, np.ndarray]:
+    offsets = np.arange(
+        -FRACTIONAL_DELAY_HALF_WIDTH, FRACTIONAL_DELAY_HALF_WIDTH + 1,
+        dtype=np.float64,
+    )
+    return offsets, np.kaiser(offsets.size, 8.6)
+
+
+def fractional_delay_kernel(delay_samples: float) -> Tuple[int, np.ndarray]:
+    """Return start sample and 65-tap windowed-sinc arrival weights.
+
+    DC gain is unity and magnitude error is below 0.002 dB through 90% of
+    Nyquist. As with any real fractional-delay FIR, the Nyquist limit is not
+    an all-pass response. Integer arrivals remain exact single samples.
+    Samples before time zero or beyond the output window must be cropped,
+    not wrapped or independently renormalized.
+    """
+    centre = int(np.floor(float(delay_samples) + 0.5))
+    fraction = float(delay_samples) - centre
+    if abs(fraction) < 1e-10:
+        return centre, np.ones(1, dtype=np.float32)
+    offsets, window = _fractional_delay_window()
+    weights = np.sinc(offsets - fraction) * window
+    weights /= np.sum(weights)
+    return centre - FRACTIONAL_DELAY_HALF_WIDTH, weights.astype(np.float32)
+
+
+def _add_impulse_kernel(
+    ir: np.ndarray, values: np.ndarray, start: int, kernel: np.ndarray,
+) -> bool:
+    """Accumulate on the last axis, clipping without wraparound or gain changes."""
+    source_start = max(0, -start)
+    destination_start = max(0, start)
+    count = min(kernel.size - source_start, ir.shape[-1] - destination_start)
+    if count <= 0:
+        return False
+    ir[..., destination_start:destination_start + count] += (
+        values[..., None] * kernel[source_start:source_start + count]
+    )
+    return True
+
+
+def add_fractional_impulse(
+    ir: np.ndarray, values: np.ndarray, delay_samples: float,
+) -> bool:
+    """Place one shared band-limited arrival across any number of channels."""
+    start, kernel = fractional_delay_kernel(delay_samples)
+    return _add_impulse_kernel(ir, values, start, kernel)
+
+
 def design_band_kernel(
     band_profile: np.ndarray, sr: int, kernel_len: Optional[int] = None
 ) -> np.ndarray:
     """Design a causal minimum-phase frequency reconstruction filter."""
     if kernel_len is None:
         kernel_len = _default_kernel_length(sr)
-    key = tuple(float(round(float(v), 5)) for v in band_profile)
-    return _band_kernel_cache(key, int(sr), int(kernel_len))
+    profile = np.maximum(np.asarray(band_profile, dtype=np.float64), 0.0)
+    level = float(np.max(profile))
+    if level == 0.0:
+        return np.zeros(max(16, int(kernel_len)), dtype=np.float32)
+    # Cache spectral shape separately from pressure. Absolute decimal rounding
+    # changes distant/quiet arrivals and can turn an entire band into silence;
+    # normalization also keeps the cepstral floor relative to the source level.
+    key = tuple(float(v) for v in profile / level)
+    return _band_kernel_cache(key, int(sr), int(kernel_len)) * level
 
 
 def add_filtered_impulse(ir: np.ndarray, ambi_vec: np.ndarray, delay_samples: float, 
                         amplitude: float, band_profile: np.ndarray, sr: int) -> bool:
-    """Add a frequency-filtered impulse to the impulse response."""
+    """Place a minimum-phase material response with band-limited timing."""
     kernel = design_band_kernel(band_profile, sr)
-    base = int(np.floor(delay_samples))
-    frac = float(delay_samples - base)
-    
-    weights = ((base, 1.0 - frac), (base + 1, frac))
-    wrote = False
-    
-    for start, weight in weights:
-        if weight <= 0.0:
-            continue
-        source_start = max(0, -start)
-        destination_start = max(0, start)
-        count = min(
-            kernel.shape[0] - source_start,
-            ir.shape[1] - destination_start,
-        )
-        if count <= 0:
-            continue
-        destination = slice(destination_start, destination_start + count)
-        source = slice(source_start, source_start + count)
-        ir[:, destination] += (
-            ambi_vec[:, None]
-            * (amplitude * weight)
-            * kernel[None, source]
-        )
-        wrote = True
-    
-    return wrote
+    start, timing_kernel = fractional_delay_kernel(delay_samples)
+    if timing_kernel.size > 1:
+        kernel = np.convolve(kernel, timing_kernel)
+    return _add_impulse_kernel(ir, ambi_vec * amplitude, start, kernel)
 
 
 class MaterialProperties:

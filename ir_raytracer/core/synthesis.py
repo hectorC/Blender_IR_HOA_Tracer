@@ -3,15 +3,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import ceil, log2
-from typing import Iterable, List
+from typing import Iterable
 
 import mathutils
 import numpy as np
 
 from .acoustics import (
     NUM_BANDS,
+    FRACTIONAL_DELAY_HALF_WIDTH,
+    add_fractional_impulse,
     add_filtered_impulse,
-    design_complementary_filter_bank,
+    design_power_complementary_filter_bank,
 )
 from .ambisonic import AmbisonicEncoder
 
@@ -86,15 +88,20 @@ def synthesize_ambisonic_ir(
 ) -> tuple[np.ndarray, SynthesisStats]:
     """Synthesize pressure from deterministic and stochastic energy events.
 
-    Direct and deterministic early events retain a coherent, causal pressure
-    impulse. Monte Carlo events receive repeatable random polarity before a
-    complementary filter bank converts their seven energy bands to pressure.
+    Direct and deterministic early events retain coherent pressure and
+    band-limited arrival timing. Monte Carlo events receive repeatable random
+    polarity before a power-complementary bank converts energy to pressure.
     This prevents unrelated diffuse paths from adding as if phase-coherent.
     """
     sample_rate = max(1000, int(sample_rate))
     sample_count = max(1, int(round(float(duration_seconds) * sample_rate)))
     result = np.zeros((16, sample_count), dtype=np.float32)
-    diffuse_trains = np.zeros((NUM_BANDS, 16, sample_count), dtype=np.float32)
+    # Keep interpolation outside the output window until after band filtering:
+    # those samples can still contribute inside it. Crop only the final IR.
+    padding = FRACTIONAL_DELAY_HALF_WIDTH
+    diffuse_trains = np.zeros(
+        (NUM_BANDS, 16, sample_count + 2 * padding), dtype=np.float32
+    )
     early_gain = 10.0 ** (float(early_gain_db) / 20.0)
     diffuse_gain = 10.0 ** (float(diffuse_gain_db) / 20.0)
     rng = np.random.default_rng(int(seed) if int(seed) != 0 else None)
@@ -146,17 +153,12 @@ def synthesize_ambisonic_ir(
         stats.diffuse_events += 1
         signs = rng.choice((-1.0, 1.0), size=NUM_BANDS).astype(np.float32)
         band_pressure = pressure * signs
-        base = int(np.floor(delay_samples))
-        fraction = float(delay_samples - base)
         values = band_pressure[:, None] * ambisonic[None, :]
-        if 0 <= base < sample_count:
-            diffuse_trains[:, :, base] += values * (1.0 - fraction)
-        if fraction > 0.0 and 0 <= base + 1 < sample_count:
-            diffuse_trains[:, :, base + 1] += values * fraction
+        add_fractional_impulse(diffuse_trains, values, delay_samples + padding)
 
     if stats.diffuse_events:
-        kernels, group_delay = design_complementary_filter_bank(sample_rate)
-        convolution_size = sample_count + kernels.shape[1] - 1
+        kernels, group_delay = design_power_complementary_filter_bank(sample_rate)
+        convolution_size = diffuse_trains.shape[-1] + kernels.shape[1] - 1
         fft_size = 1 << int(ceil(log2(max(2, convolution_size))))
         for band in range(NUM_BANDS):
             kernel_spectrum = np.fft.rfft(kernels[band], n=fft_size)
@@ -166,7 +168,8 @@ def synthesize_ambisonic_ir(
                 n=fft_size,
                 axis=1,
             )
-            result += filtered[:, group_delay:group_delay + sample_count].astype(
+            output_start = group_delay + padding
+            result += filtered[:, output_start:output_start + sample_count].astype(
                 np.float32
             )
 

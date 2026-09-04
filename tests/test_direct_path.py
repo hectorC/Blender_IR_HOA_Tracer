@@ -125,6 +125,24 @@ class DirectPathTests(unittest.TestCase):
         dipole = dipole_engine.render(self.source, self.receiver)
         np.testing.assert_allclose(dipole.ir, -omni.ir, atol=1e-7)
 
+    def test_179_metre_direct_path_keeps_distance_level_and_fractional_timing(self):
+        distance = 179.0
+        config = replace(_config('FULL'), duration_seconds=0.7)
+        engine = AmbisonicIREngine(None, config, AcousticScene(None, []))
+        result = engine.render(Vector((0.0, distance, 0.0)), self.receiver)
+        self.assertEqual(result.synthesis.direct_events, 1)
+        self.assertAlmostEqual(float(np.sum(result.ir[0])) * distance, 1.0, places=5)
+        self.assertEqual(
+            int(np.argmax(np.abs(result.ir[0]))),
+            round(config.sample_rate * distance / config.speed_of_sound_bu),
+        )
+        frequencies = np.fft.rfftfreq(result.ir.shape[1], 1 / config.sample_rate)
+        response = np.fft.rfft(result.ir[0]) * distance
+        mask = frequencies <= 0.45 * config.sample_rate
+        self.assertLess(
+            float(np.max(abs(20 * np.log10(abs(response[mask]))))), 0.002
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

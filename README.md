@@ -10,7 +10,7 @@ software and should not be used for building or safety decisions.
 
 ## Current architecture
 
-Version 2.3.0 combines deterministic direct sound and specular reflections
+Version 2.3.1 combines deterministic direct sound and specular reflections
 with bidirectional acoustic-energy transport.
 
 - Direct sound is evaluated deterministically, including per-band transmission.
@@ -27,8 +27,15 @@ with bidirectional acoustic-energy transport.
 - The receiver-only, source-only, and joined estimators are combined per path
   order with uniform multiple-importance weights. All-specular paths already
   covered by the image-source stage are omitted from the stochastic estimator.
+- Arrivals between audio samples use 65-tap Kaiser-windowed sinc interpolation,
+  with unity DC gain and timing compensated for the filter's support.
 - Monte Carlo energy events are converted to pressure with repeatable randomized
-  phase and a complementary seven-band filter bank.
+  polarity per band and a power-complementary seven-band filter bank. Adjacent
+  bands use sine/cosine crossovers on a log-frequency scale, so independent band
+  powers combine at approximately constant level. Default finite filters keep
+  the equal-band power response within 0.15 dB of unity.
+- All 16 channels share each event's timing, band polarities, and filters; its
+  directional encoding is preserved throughout reconstruction.
 - Every arrival is encoded directly to third-order ACN/SN3D (AmbiX) using its
   listener-relative arrival direction.
 - Optional bounded single-edge diffraction supplies a creative shadow-zone
@@ -138,6 +145,14 @@ Initial propagation silence is retained, so the window must include travel time
 to the receiver as well as the wanted decay. Energy still sounding at the end
 is cut off. Choose a longer window if needed and apply an artistic fade in your
 audio editor if desired.
+
+Filter delays are compensated, so echo times follow acoustic travel times.
+Band-limited reconstruction can ring around an arrival, including before its
+nominal time. At 48 kHz, fractional-delay support extends up to 32 samples
+(0.67 ms) either side of the nearest sample; the diffuse band filters extend
+about 43 ms either side to resolve the lowest crossover. This filter support
+does not represent extra acoustic paths. Samples outside the output window are
+cropped without wraparound or boundary gain compensation.
 
 The decay within that window follows material losses, air absorption, and
 escape through openings, subject to the numerical limits set by **Maximum
@@ -417,9 +432,10 @@ exercises Blender's actual add-on loader (including restricted registration
 access), and then discovers the regression tests. It does not depend on the
 separately installed add-on being up to date.
 
-The test suite checks ACN/SN3D encoding, air attenuation, complementary-band
-synthesis, coherent pressure transfer, reciprocal and joined path weighting,
-multi-order finite image-source paths, direct-path calibration, source
+The test suite checks ACN/SN3D encoding, air attenuation, power-complementary
+band synthesis, fractional-delay magnitude and phase, boundary cropping,
+cross-channel coherence, coherent pressure transfer, reciprocal and joined path
+weighting, multi-order finite image-source paths, direct-path calibration, source
 directivity and rotation, content separation, diffraction, evaluated Blender
 geometry and material assignments, safe worker-thread snapshots, tooltips,
 repeatability, and WAV/JSON export. These are regression checks, not a listening
